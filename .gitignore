@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+venv/
+.env
+*.egg-info/
+
+# Secrets — NEVER commit these
+backend/.env
+backend/.env.local
+backend/.env.*.local
+backend/firebase-credentials.json
+backend/firebase*.json
+
+# Node
+node_modules/
+dist/
+build/
+.DS_Store
+
+# Logs
+*.log
+logs/
+
+# Test coverage
+.coverage
+htmlcov/
+.pytest_cache/
+
+# IDE
+.vscode/
+.idea/
