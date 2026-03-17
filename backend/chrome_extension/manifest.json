@@ -1,0 +1,63 @@
+{
+  "manifest_version": 3,
+  "name": "Express Entry Autofill",
+  "version": "1.0.1",
+  "description": "Auto-fills your IRCC Express Entry profile using data from your Express Entry app.",
+
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "storage",
+    "notifications",
+    "tabs"
+  ],
+
+  "host_permissions": [
+    "https://prson-srpel.apps.cic.gc.ca/*",
+    "https://onlineservices-servicesenligne.cic.gc.ca/*",
+    "https://*.cic.gc.ca/*",
+    "http://localhost:8000/*"
+  ],
+
+  "background": {
+    "service_worker": "background.js"
+  },
+
+  "action": {
+    "default_popup": "pages/popup.html",
+    "default_icon": {
+      "16":  "icons/icon16.png",
+      "48":  "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+
+  "icons": {
+    "16":  "icons/icon16.png",
+    "48":  "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+
+  "content_scripts": [
+    {
+      "matches": [
+        "https://prson-srpel.apps.cic.gc.ca/*",
+        "https://onlineservices-servicesenligne.cic.gc.ca/*",
+        "https://*.cic.gc.ca/*"
+      ],
+      "exclude_matches": [
+        "https://*.cic.gc.ca/en/login*",
+        "https://*.cic.gc.ca/en/auth*"
+      ],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+
+  "web_accessible_resources": [
+    {
+      "resources": ["icons/*"],
+      "matches": ["<all_urls>"]
+    }
+  ]
+}

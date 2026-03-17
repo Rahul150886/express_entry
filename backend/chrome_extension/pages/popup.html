@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Express Entry Autofill</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      width: 320px;
+      min-height: 200px;
+      background: #0f172a;
+      color: #e2e8f0;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      font-size: 13px;
+    }
+
+    /* ── Header ── */
+    .header {
+      background: linear-gradient(135deg, #1e40af 0%, #1e293b 100%);
+      padding: 16px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      border-bottom: 1px solid #1e3a5f;
+    }
+    .header-icon { font-size: 24px; }
+    .header-text h1 { font-size: 14px; font-weight: 700; color: #f8fafc; }
+    .header-text p  { font-size: 10px; color: #94a3b8; margin-top: 1px; }
+    .badge {
+      margin-left: auto;
+      font-size: 10px;
+      font-weight: 700;
+      padding: 2px 8px;
+      border-radius: 20px;
+    }
+    .badge-ok  { background: #064e3b; color: #34d399; }
+    .badge-off { background: #422006; color: #fbbf24; }
+
+    /* ── Sections ── */
+    .section { padding: 14px 16px; border-bottom: 1px solid #1e293b; }
+    .section:last-child { border-bottom: none; }
+
+    .section-label {
+      font-size: 9px;
+      font-weight: 800;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+      color: #475569;
+      margin-bottom: 10px;
+    }
+
+    /* ── Profile card ── */
+    .profile-card {
+      background: #1e293b;
+      border: 1px solid #334155;
+      border-radius: 12px;
+      padding: 12px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .avatar {
+      width: 36px; height: 36px;
+      background: #1e3a5f;
+      border-radius: 10px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 18px; flex-shrink: 0;
+    }
+    .profile-name { font-weight: 700; font-size: 13px; color: #f8fafc; }
+    .profile-meta { font-size: 10px; color: #64748b; margin-top: 2px; }
+    .profile-crs  { margin-left: auto; text-align: right; }
+    .crs-score    { font-size: 20px; font-weight: 800; color: #60a5fa; }
+    .crs-label    { font-size: 9px; color: #64748b; }
+
+    /* ── Page indicator ── */
+    .page-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      background: #1e293b;
+      border: 1px solid #334155;
+      border-radius: 20px;
+      padding: 5px 12px;
+      font-size: 11px;
+      font-weight: 600;
+      color: #94a3b8;
+      margin-bottom: 10px;
+    }
+    .page-dot {
+      width: 7px; height: 7px;
+      border-radius: 50%;
+      background: #64748b;
+    }
+    .page-dot.active { background: #34d399; }
+
+    /* ── Buttons ── */
+    .btn {
+      width: 100%;
+      padding: 10px;
+      border: none;
+      border-radius: 10px;
+      font-weight: 700;
+      font-size: 13px;
+      cursor: pointer;
+      transition: all 0.15s;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+    }
+    .btn-primary { background: #2563eb; color: #fff; }
+    .btn-primary:hover:not(:disabled) { background: #1d4ed8; }
+    .btn-secondary { background: #1e293b; color: #94a3b8; border: 1px solid #334155; margin-top: 8px; }
+    .btn-secondary:hover { color: #e2e8f0; border-color: #475569; }
+    .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    /* ── Login form ── */
+    .login-desc { font-size: 11px; color: #64748b; margin-bottom: 12px; line-height: 1.5; }
+    .field-label { font-size: 10px; font-weight: 700; color: #64748b; text-transform: uppercase; letter-spacing: .05em; margin-bottom: 4px; }
+    .field-input {
+      width: 100%;
+      padding: 8px 10px;
+      background: #1e293b;
+      border: 1px solid #334155;
+      border-radius: 8px;
+      color: #e2e8f0;
+      font-size: 12px;
+      outline: none;
+      margin-bottom: 10px;
+    }
+    .field-input:focus { border-color: #3b82f6; }
+    .error-msg { font-size: 11px; color: #f87171; margin-top: 6px; text-align: center; }
+
+    /* ── Result toast ── */
+    .result-bar {
+      font-size: 11px;
+      padding: 8px 12px;
+      border-radius: 8px;
+      margin-top: 8px;
+      text-align: center;
+      font-weight: 600;
+    }
+    .result-ok  { background: #064e3b; color: #34d399; }
+    .result-err { background: #450a0a; color: #f87171; }
+    .result-info{ background: #1e3a5f; color: #93c5fd; }
+
+    /* ── Steps list ── */
+    .steps { list-style: none; }
+    .steps li {
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+      padding: 5px 0;
+      font-size: 11px;
+      color: #94a3b8;
+      border-bottom: 1px solid #1e293b;
+    }
+    .steps li:last-child { border-bottom: none; }
+    .step-num {
+      width: 18px; height: 18px;
+      background: #1e293b;
+      border: 1px solid #334155;
+      border-radius: 50%;
+      font-size: 9px;
+      font-weight: 800;
+      color: #64748b;
+      display: flex; align-items: center; justify-content: center;
+      flex-shrink: 0; margin-top: 1px;
+    }
+    .steps li.done .step-num { background: #064e3b; border-color: #34d399; color: #34d399; }
+    .steps li.done span { color: #64748b; text-decoration: line-through; }
+
+    /* ── Spinner ── */
+    .spinner {
+      display: inline-block;
+      width: 12px; height: 12px;
+      border: 2px solid rgba(255,255,255,.2);
+      border-top-color: #fff;
+      border-radius: 50%;
+      animation: spin .6s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* ── Footer ── */
+    .footer {
+      padding: 8px 16px;
+      border-top: 1px solid #1e293b;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .footer a { font-size: 10px; color: #475569; text-decoration: none; }
+    .footer a:hover { color: #94a3b8; }
+    .logout-btn {
+      background: none;
+      border: none;
+      font-size: 10px;
+      color: #475569;
+      cursor: pointer;
+      padding: 0;
+    }
+    .logout-btn:hover { color: #f87171; }
+
+    /* ── Hidden ── */
+    .hidden { display: none !important; }
+  </style>
+</head>
+<body>
+  <!-- Header -->
+  <div class="header">
+    <div class="header-icon">🍁</div>
+    <div class="header-text">
+      <h1>Express Entry Autofill</h1>
+      <p>IRCC portal helper</p>
+    </div>
+    <div id="auth-badge" class="badge badge-off">Not connected</div>
+  </div>
+
+  <!-- LOGGED OUT VIEW -->
+  <div id="view-login">
+    <div class="section">
+      <p class="section-label">Connect to your app</p>
+      <p class="login-desc">Sign in with the same account you use on the Express Entry app (localhost:8000).</p>
+      <div>
+        <p class="field-label">Email</p>
+        <input id="login-email" type="email" class="field-input" placeholder="you@email.com" />
+        <p class="field-label">Password</p>
+        <input id="login-password" type="password" class="field-input" placeholder="••••••••" />
+      </div>
+      <button id="login-btn" class="btn btn-primary">
+        Sign In
+      </button>
+      <div id="login-error" class="error-msg hidden"></div>
+    </div>
+  </div>
+
+  <!-- LOGGED IN VIEW -->
+  <div id="view-main" class="hidden">
+    <!-- Profile summary -->
+    <div class="section">
+      <div class="profile-card">
+        <div class="avatar">👤</div>
+        <div>
+          <div id="profile-name" class="profile-name">Loading…</div>
+          <div id="profile-meta" class="profile-meta">—</div>
+        </div>
+        <div class="profile-crs">
+          <div id="profile-crs" class="crs-score">—</div>
+          <div class="crs-label">CRS</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Current page -->
+    <div class="section">
+      <p class="section-label">Current IRCC Page</p>
+      <div class="page-pill">
+        <div id="page-dot" class="page-dot"></div>
+        <span id="page-label">Detecting…</span>
+      </div>
+
+      <button id="fill-btn" class="btn btn-primary" disabled>
+        Fill This Page
+      </button>
+      <div id="fill-result" class="hidden"></div>
+    </div>
+
+    <!-- How to use -->
+    <div class="section">
+      <p class="section-label">Steps</p>
+      <ul class="steps" id="steps-list">
+        <li id="step-navigate"><div class="step-num">1</div><span>Go to IRCC Express Entry profile page</span></li>
+        <li id="step-detect"><div class="step-num">2</div><span>Extension detects the section automatically</span></li>
+        <li id="step-fill"><div class="step-num">3</div><span>Click "Fill This Page" to populate fields</span></li>
+        <li id="step-review"><div class="step-num">4</div><span>Review prefilled data, then submit</span></li>
+      </ul>
+    </div>
+
+    <!-- Footer -->
+    <div class="footer">
+      <a href="http://localhost:3000" target="_blank">Open App ↗</a>
+      <button class="logout-btn" id="logout-btn">Disconnect</button>
+    </div>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
