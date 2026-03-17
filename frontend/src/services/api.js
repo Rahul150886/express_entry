@@ -87,7 +87,10 @@ export const profileAPI = {
       throw err
     }
   },
-  getIrccReady:     ()     => api.get('/profile/ircc-ready'),
+  getIrccReady:    ()     => api.get('/profile/ircc-ready'),
+  getVerified:     ()     => api.get('/profile/ircc-verified'),
+  getSyncStatus:   ()     => api.get('/profile/sync-status'),
+  syncAction:      (data) => api.post('/profile/sync-action', data),
   addLanguageTest:    (data)     => api.post('/profile/language-tests', data),
   updateLanguageTest: (id, data) => api.put(`/profile/language-tests/${id}`, data),
   deleteLanguageTest: (id)       => api.delete(`/profile/language-tests/${id}`),
@@ -119,7 +122,9 @@ export const documentsAPI = {
     log.info('Documents', `Uploading file="${file.name}" size=${(file.size/1024).toFixed(1)}KB type=${documentType} person=${personLabel}`)
     return api.post('/documents/upload', form, { headers: { 'Content-Type': 'multipart/form-data' } })
   },
-  getReview: (id) => api.get(`/documents/${id}/review`),
+  getReview:   (id) => api.get(`/documents/${id}/review`),
+  getPreview:  (id) => api.get(`/documents/${id}/preview`, { responseType: 'arraybuffer' }),
+  reReview:    (id) => api.post(`/documents/${id}/re-review`),
   delete:    (id) => api.delete(`/documents/${id}`),
 }
 
@@ -133,7 +138,10 @@ export const drawsAPI = {
 
 // ─── Cases ──────────────────────────────────
 export const casesAPI = {
-  getActive:           ()           => api.get('/cases/active'),
+  getActive: () => api.get('/cases/active').catch(err => {
+    if (err?.response?.status === 404) return { data: null }  // No ITA yet — not an error
+    return Promise.reject(err)
+  }),
   recordITA:           (drawId)     => api.post('/cases/ita-received', null, { params: drawId ? { draw_id: drawId } : {} }),
   updateChecklistItem: (id, data)   => api.patch(`/cases/checklist/${id}`, null, { params: data }),
   updateStatus:        (id, status) => api.patch(`/cases/${id}/status`, null, { params: { status } }),

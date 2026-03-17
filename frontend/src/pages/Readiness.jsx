@@ -79,10 +79,16 @@ export default function Readiness() {
   const latestDraw = draws?.[0]
   const gapToDraw = latestDraw ? latestDraw.minimum_crs - score : null
 
-  const programs = eligibility?.programs || {}
-  const isEligible = Object.values(programs).some(p => p.eligible)
-  const fswEligible = programs?.federal_skilled_worker?.eligible
-  const cecEligible = programs?.canadian_experience_class?.eligible
+  // API returns {FSW: {...}, CEC: {...}, FST: {...}} at top level
+  const programs = eligibility?.programs || {
+    FSW: eligibility?.FSW,
+    CEC: eligibility?.CEC,
+    FST: eligibility?.FST,
+  }
+  const cleanPrograms = Object.fromEntries(Object.entries(programs).filter(([,v]) => v !== undefined))
+  const isEligible    = Object.values(cleanPrograms).some(p => p?.eligible)
+  const fswEligible   = cleanPrograms?.FSW?.eligible
+  const cecEligible   = cleanPrograms?.CEC?.eligible
 
   // Document analysis
   const uploadedTypes = new Set(documents.map(d => d.document_type))
@@ -223,7 +229,7 @@ export default function Readiness() {
           <p className="font-bold text-white">Eligibility</p>
         </div>
 
-        {Object.entries(programs).map(([code, prog]) => (
+        {Object.entries(cleanPrograms).map(([code, prog]) => (
           <CheckRow
             key={code}
             label={prog.name || code.replace(/_/g, ' ').toUpperCase()}
@@ -235,7 +241,7 @@ export default function Readiness() {
             linkLabel="Details"
           />
         ))}
-        {Object.keys(programs).length === 0 && (
+        {Object.keys(cleanPrograms).length === 0 && (
           <CheckRow
             label="Eligibility not checked"
             status="error"

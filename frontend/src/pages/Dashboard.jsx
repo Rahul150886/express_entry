@@ -198,8 +198,9 @@ export default function Dashboard() {
       ] : [] },
   ] : []
 
-  // FSW data
-  const fsw = eligibility?.programs?.FSW
+  // API returns {FSW: {...}, CEC: {...}, FST: {...}} at top level
+  // useCrs hook seeds cache with {programs: {FSW: ...}} shape — handle both
+  const fsw = eligibility?.FSW || eligibility?.programs?.FSW
   const fswPts = fsw?.selection_points ?? 0
   const fswEligible = fswPts >= 67
   const fswGap = Math.max(0, 67 - fswPts)
@@ -567,9 +568,17 @@ export default function Dashboard() {
 
           <div className="p-3 rounded-xl border border-slate-700 bg-slate-900/40 flex-1">
             <p className="text-[10px] text-slate-500 mb-2">Programs You Qualify For</p>
-            {eligibility?.programs ? (
+            {(eligibility?.programs || eligibility?.FSW || eligibility?.CEC) ? (() => {
+              // Handle both {programs: {FSW:...}} and {FSW:..., CEC:...} shapes
+              const progs = eligibility?.programs || {
+                FSW: eligibility?.FSW,
+                CEC: eligibility?.CEC,
+                FST: eligibility?.FST,
+              }
+              const cleanProgs = Object.fromEntries(Object.entries(progs).filter(([,v]) => v !== undefined))
+              return (
               <div className="flex flex-wrap gap-1.5">
-                {Object.entries(eligibility.programs).map(([code, prog]) => (
+                {Object.entries(cleanProgs).map(([code, prog]) => (
                   <span key={code} className={clsx('text-[10px] px-2 py-0.5 rounded-full font-semibold',
                     prog.eligible ? 'bg-emerald-500/15 text-emerald-400' : 'bg-slate-700 text-slate-500'
                   )}>
@@ -577,7 +586,8 @@ export default function Dashboard() {
                   </span>
                 ))}
               </div>
-            ) : loadingEligibility
+              )
+            })() : loadingEligibility
               ? <div className="h-5 shimmer rounded" />
               : <p className="text-[10px] text-slate-600">Complete profile to check</p>
             }

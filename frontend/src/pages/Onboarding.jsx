@@ -571,14 +571,16 @@ function OtherStep({ profile, onNext, onBack }) {
 
 // ── Eligibility Result ───────────────────────────────────────────
 function EligibilityResult({ crsScore, eligibility, onContinue }) {
-  const programs    = eligibility?.programs || {}
-  const fsw         = programs?.federal_skilled_worker
-  const cec         = programs?.canadian_experience_class
-  const fst         = programs?.federal_skilled_trades
-  const anyEligible = Object.values(programs).some(p => p.eligible)
+  // API returns {FSW: {...}, CEC: {...}, FST: {...}} at top level
+  const fsw         = eligibility?.FSW || eligibility?.programs?.FSW
+  const cec         = eligibility?.CEC || eligibility?.programs?.CEC
+  const fst         = eligibility?.FST || eligibility?.programs?.FST
+  const anyEligible = !!(fsw?.eligible || cec?.eligible || fst?.eligible)
+  const programs    = { FSW: fsw, CEC: cec, FST: fst }
 
-  const fswBreakdown = fsw?.breakdown || {}
-  const fswTotal = Object.values(fswBreakdown).reduce((sum, v) => {
+  // Breakdown is inside checks array, not a direct property
+  const fswBreakdown = fsw?.checks?.find(c => c.criterion === 'FSW 67-point selection grid')?.breakdown || {}
+  const fswTotal = fsw?.selection_points || Object.values(fswBreakdown).reduce((sum, v) => {
     return sum + parseInt(String(v).match(/^(\d+)/)?.[1] || '0')
   }, 0)
 
@@ -665,7 +667,7 @@ function EligibilityResult({ crsScore, eligibility, onContinue }) {
             { prog: fsw, label: 'Federal Skilled Worker (FSW)', desc: '67/100 pts on grid + CLB 7 minimum' },
             { prog: cec, label: 'Canadian Experience Class (CEC)', desc: '1+ year Canadian work experience' },
             { prog: fst, label: 'Federal Skilled Trades (FST)', desc: '2+ years qualifying trades experience' },
-          ].map(({ prog, label, desc }) => (
+          ].filter(({ prog }) => prog !== undefined).map(({ prog, label, desc }) => (
             <div key={label} className={clsx('flex items-start gap-3 p-3 rounded-xl border',
               prog?.eligible ? 'border-emerald-500/25 bg-emerald-500/5' : 'border-slate-800 bg-slate-800/20'
             )}>

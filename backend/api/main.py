@@ -162,9 +162,17 @@ class ApplicantProfileRequest(BaseModel):
     has_provincial_nomination: bool = False
     has_sibling_in_canada: bool = False
     has_certificate_of_qualification: bool = False
+    # Extended personal fields
+    city_of_birth: Optional[str] = None
+    province_of_destination: Optional[str] = None
+    # Passport fields (used by Chrome extension autofill)
+    passport_number: Optional[str] = None
+    passport_country_of_issue: Optional[str] = None
+    passport_issue_date: Optional[str] = None   # YYYY-MM-DD
+    passport_expiry_date: Optional[str] = None  # YYYY-MM-DD
+    # Spouse fields
     spouse_education_level: Optional[str] = None
     spouse_canadian_work_years: Optional[float] = None
-    # Extended spouse profile
     spouse_name: Optional[str] = None
     spouse_dob: Optional[str] = None  # YYYY-MM-DD
     spouse_nationality: Optional[str] = None
@@ -489,6 +497,20 @@ async def update_profile(
     applicant.has_provincial_nomination = request.has_provincial_nomination
     applicant.has_sibling_in_canada = request.has_sibling_in_canada
     applicant.has_certificate_of_qualification = request.has_certificate_of_qualification
+    # New fields
+    if request.city_of_birth is not None:
+        applicant.city_of_birth = request.city_of_birth
+    if request.province_of_destination is not None:
+        applicant.province_of_destination = request.province_of_destination
+    if request.passport_number is not None:
+        applicant.passport_number = request.passport_number
+    if request.passport_country_of_issue is not None:
+        applicant.passport_country_of_issue = request.passport_country_of_issue
+    if request.passport_issue_date:
+        applicant.passport_issue_date = ddate.fromisoformat(request.passport_issue_date)
+    if request.passport_expiry_date:
+        applicant.passport_expiry_date = ddate.fromisoformat(request.passport_expiry_date)
+    # Spouse fields
     applicant.spouse_education_level = request.spouse_education_level
     applicant.spouse_canadian_work_years = request.spouse_canadian_work_years
     applicant.spouse_name = request.spouse_name
@@ -1169,6 +1191,77 @@ async def get_ai_document_review(
     }
 
 
+@app.get(f"{v1}/documents/{{document_id}}/preview", tags=["Documents"])
+async def get_document_preview(
+    document_id: UUID,
+    current_user: UserDB = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """Return raw document bytes for client-side preview (images + PDFs)."""
+    from fastapi.responses import Response
+    applicant = await _get_applicant(current_user.id, db)
+    doc = await db.get(ApplicationDocumentDB, document_id)
+    if not doc or doc.applicant_id != applicant.id:
+        raise HTTPException(status_code=404, detail="Document not found")
+    if not doc.blob_url:
+        raise HTTPException(status_code=404, detail="No file stored for this document")
+    try:
+        file_bytes = await blob_storage.download(doc.blob_url)
+        return Response(
+            content=file_bytes,
+            media_type=doc.mime_type or "application/octet-stream",
+            headers={"Cache-Control": "private, max-age=3600"}
+        )
+    except Exception as e:
+        logger.error(f"Document preview error doc_id={document_id}: {e}")
+        raise HTTPException(status_code=500, detail="Could not load document preview")
+
+
+@app.post(f"{v1}/documents/{{document_id}}/re-review", tags=["Documents"])
+async def re_review_document(
+    document_id: UUID,
+    current_user: UserDB = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """Re-trigger AI analysis on a document — use after updating profile to clear stale issues."""
+    from sqlalchemy.orm.attributes import flag_modified
+
+    applicant = await _get_applicant(current_user.id, db)
+    doc = await db.get(ApplicationDocumentDB, document_id)
+    if not doc or str(doc.applicant_id) != str(applicant.id):
+        raise HTTPException(status_code=404, detail="Document not found")
+    if not doc.blob_url:
+        raise HTTPException(status_code=400, detail="No file stored for this document")
+
+    try:
+        # Reset status — flag_modified needed for SQLAlchemy to detect JSON field changes
+        doc.status = "ai_processing"
+        doc.ai_review_notes = ""          # NOT NULL column — use empty string not None
+        doc.ai_issues = []
+        doc.ai_extracted_fields = None
+        doc.ai_confidence = None
+        flag_modified(doc, "ai_issues")
+        flag_modified(doc, "ai_extracted_fields")
+        await db.commit()
+    except Exception as e:
+        logger.error(f"re-review DB reset failed doc_id={document_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"DB error: {e}")
+
+    # Re-dispatch Celery task
+    try:
+        from workers.tasks import analyze_document_task
+        analyze_document_task.apply_async(
+            args=[str(doc.id), doc.document_type, doc.blob_url, doc.mime_type],
+            countdown=2
+        )
+        logger.info(f"re-review triggered: doc_id={doc.id}  type={doc.document_type}  user={current_user.id}")
+    except Exception as e:
+        logger.warning(f"Celery unavailable for re-review doc_id={doc.id}: {e}")
+        raise HTTPException(status_code=503, detail="AI worker unavailable — try again later")
+
+    return {"status": "ai_processing", "message": "Re-analysis started. Results will appear in ~30 seconds."}
+
+
 @app.delete(f"{v1}/documents/{{document_id}}", tags=["Documents"])
 async def delete_document(
     document_id: UUID,
@@ -1759,39 +1852,87 @@ async def get_ircc_ready_profile(
         "dob_year":               str(dob.year)             if dob else "",
         "dob_month":              str(dob.month).zfill(2)   if dob else "",
         "dob_day":                str(dob.day).zfill(2)     if dob else "",
-        "country_of_birth":       applicant.nationality     or "",   # Best guess — no separate birth country field yet
-        "city_of_birth":          "",                                 # Not stored yet — user fills manually
-        "country_of_citizenship": applicant.nationality     or "",
-        "country_of_residence":   applicant.country_of_residence or applicant.nationality or "",
-        "marital_status":         applicant.marital_status  or "single",
+        "country_of_birth":       applicant.nationality              or "",
+        "city_of_birth":          applicant.city_of_birth            or "",
+        "country_of_citizenship": applicant.nationality              or "",
+        "country_of_residence":   applicant.country_of_residence     or applicant.nationality or "",
+        "marital_status":         applicant.marital_status           or "single",
+        "province_of_destination": applicant.province_of_destination or "",
     }
 
     # Language section
     language = {
-        "first_language_test": primary_lang.test_type           if primary_lang else "",
-        "listening_score":     str(primary_lang.listening)      if primary_lang else "",
-        "reading_score":       str(primary_lang.reading)        if primary_lang else "",
-        "writing_score":       str(primary_lang.writing)        if primary_lang else "",
-        "speaking_score":      str(primary_lang.speaking)       if primary_lang else "",
-        "test_date":           primary_lang.test_date.isoformat() if primary_lang and primary_lang.test_date else "",
-        "registration_number": primary_lang.registration_number if primary_lang else "",
-        "clb_listening":       str(primary_lang.clb_listening)  if primary_lang else "",
-        "clb_reading":         str(primary_lang.clb_reading)    if primary_lang else "",
-        "clb_writing":         str(primary_lang.clb_writing)    if primary_lang else "",
-        "clb_speaking":        str(primary_lang.clb_speaking)   if primary_lang else "",
+        "first_language_test":     primary_lang.test_type              if primary_lang else "",
+        "listening_score":         str(primary_lang.listening)         if primary_lang else "",
+        "reading_score":           str(primary_lang.reading)           if primary_lang else "",
+        "writing_score":           str(primary_lang.writing)           if primary_lang else "",
+        "speaking_score":          str(primary_lang.speaking)          if primary_lang else "",
+        "test_date":               primary_lang.test_date.isoformat()  if primary_lang and primary_lang.test_date else "",
+        "registration_number":     primary_lang.registration_number    if primary_lang else "",
+        "certificate_number":      primary_lang.registration_number    if primary_lang else "",
+        "test_result_filing_date": primary_lang.test_date.isoformat()  if primary_lang and primary_lang.test_date else "",
+        "clb_listening":           str(primary_lang.clb_listening)     if primary_lang else "",
+        "clb_reading":             str(primary_lang.clb_reading)       if primary_lang else "",
+        "clb_writing":             str(primary_lang.clb_writing)       if primary_lang else "",
+        "clb_speaking":            str(primary_lang.clb_speaking)      if primary_lang else "",
     }
 
     # Education section
     edu = applicant.education
+    study_end_year  = str(edu.completion_date.year)             if edu and edu.completion_date else ""
+    study_end_month = str(edu.completion_date.month).zfill(2)   if edu and edu.completion_date else ""
+    from datetime import date as _dc
+    eca_within_5 = "No"
+    if edu and edu.eca_organization:
+        if edu.eca_completion_date:
+            eca_within_5 = "Yes" if (_dc.today() - edu.eca_completion_date).days <= 1825 else "No"
+        else:
+            eca_within_5 = "Yes"  # assume recent if org is set but no date
+
     education = {
-        "highest_level":  edu.level               if edu else "",
-        "country_studied":edu.country             if edu else "",
-        "field_of_study": edu.field_of_study      if edu else "",
-        "institution":    edu.institution_name    if edu else "",
-        "is_canadian":    str(edu.is_canadian)    if edu else "False",
-        "eca_organization":edu.eca_organization   if edu else "",
-        "eca_reference":  edu.eca_reference_number if edu else "",
+        "highest_level":       edu.level                   if edu else "",
+        "level_of_education":  edu.level                   if edu else "",
+        "country_studied":     edu.country                 if edu else "",
+        "city_of_study":       "",
+        "field_of_study":      edu.field_of_study          if edu else "",
+        "institution":         edu.institution_name        if edu else "",
+        "is_canadian":         str(edu.is_canadian)        if edu else "False",
+        "study_to_year":       study_end_year,
+        "study_to_month":      study_end_month,
+        # Compute study_from by subtracting typical degree duration from completion date
+        "study_from_year":     str(edu.completion_date.year - (
+                                   4 if edu.level in ("bachelors","bachelor","bachelors_or_higher") else
+                                   3 if edu.level in ("masters","master","phd","doctorate") else
+                                   2 if "two" in (edu.level or "").lower() or edu.is_three_year_or_more else 1
+                               )) if edu and edu.completion_date else "",
+        "study_from_month":    str(edu.completion_date.month).zfill(2) if edu and edu.completion_date else "",
+        # full_academic_years from degree type
+        "full_academic_years": (
+            "4" if edu and edu.level in ("bachelors","bachelor","bachelors_or_higher") else
+            "2" if edu and edu.level in ("masters","master") else
+            "3" if edu and edu.is_three_year_or_more else
+            "2"
+        ) if edu else "2",
+        "complete_years":      (
+            "4" if edu and edu.level in ("bachelors","bachelor","bachelors_or_higher") else
+            "2" if edu and edu.level in ("masters","master") else
+            "2"
+        ) if edu else "2",
+        "duration_years":      (
+            "4" if edu and edu.level in ("bachelors","bachelor","bachelors_or_higher") else
+            "2" if edu and edu.level in ("masters","master") else
+            "2"
+        ) if edu else "2",
+        "full_time_part_time": "Full-time",
+        "enrollment_status":   "Full-time",
+        "academic_standing":   "Successfully completed",
+        "eca_organization":    edu.eca_organization        if edu else "",
+        "eca_reference":       edu.eca_reference_number    if edu else "",
+        "eca_within_5_years":  eca_within_5,
     }
+
+    # Primary occupation NOC
+    primary_noc = work_exps[0].noc_code if work_exps else (applicant.job_offer.noc_code if applicant.job_offer else "")
 
     # Work history
     work_history = [
@@ -1829,7 +1970,11 @@ async def get_ircc_ready_profile(
             "given_name":      " ".join(parts[:-1]) if len(parts) > 1 else "",
             "education_level": applicant.spouse_education_level or "",
             "dob":             applicant.spouse_dob.isoformat() if applicant.spouse_dob else "",
+            "dob_year":        str(applicant.spouse_dob.year)              if applicant.spouse_dob else "",
+            "dob_month":       str(applicant.spouse_dob.month).zfill(2)    if applicant.spouse_dob else "",
+            "dob_day":         str(applicant.spouse_dob.day).zfill(2)      if applicant.spouse_dob else "",
             "nationality":     applicant.spouse_nationality or "",
+            "gender":          applicant.gender or "",  # shared gender field — update if separate spouse_gender added
         }
 
     # Family members count (applicant + spouse if any)
@@ -1853,7 +1998,484 @@ async def get_ircc_ready_profile(
         "crs_score":            crs_score,
         "family_members_count": family_members_count,
         "has_applied_before":   False,
-        "passport":             None,
+        "passport":             {
+            "document_number":   applicant.passport_number or "",
+            "country_of_issue":  applicant.passport_country_of_issue or applicant.nationality or "",
+            "issue_date":        applicant.passport_issue_date.isoformat() if applicant.passport_issue_date else "",
+            "expiry_date":       applicant.passport_expiry_date.isoformat() if applicant.passport_expiry_date else "",
+            "issue_year":        str(applicant.passport_issue_date.year) if applicant.passport_issue_date else "",
+            "issue_month":       str(applicant.passport_issue_date.month).zfill(2) if applicant.passport_issue_date else "",
+            "issue_day":         str(applicant.passport_issue_date.day).zfill(2) if applicant.passport_issue_date else "",
+            "expiry_year":       str(applicant.passport_expiry_date.year) if applicant.passport_expiry_date else "",
+            "expiry_month":      str(applicant.passport_expiry_date.month).zfill(2) if applicant.passport_expiry_date else "",
+            "expiry_day":        str(applicant.passport_expiry_date.day).zfill(2) if applicant.passport_expiry_date else "",
+        },
+        "primary_noc":          primary_noc,
+        "verification":         applicant.profile_verification or {},
+    }
+
+
+# ─────────────────────────────────────────────
+# Profile Sync — Verification State
+# ─────────────────────────────────────────────
+
+@app.get(f"{v1}/profile/sync-status", tags=["Profile"])
+async def get_sync_status(
+    current_user: UserDB = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Returns the full profile verification state.
+    Shows which fields are verified/conflict/unverified/missing.
+    """
+    applicant = await _get_applicant(current_user.id, db)
+    verification = applicant.profile_verification or {}
+
+    # Separate applicant fields from spouse fields
+    applicant_v = {k: v for k, v in verification.items() if not k.startswith("spouse_")}
+    spouse_v    = {k: v for k, v in verification.items() if k.startswith("spouse_")}
+
+    conflicts   = {k: v for k, v in applicant_v.items() if v.get("status") == "conflict" and not v.get("acknowledged")}
+    verified    = {k: v for k, v in applicant_v.items() if v.get("status") == "verified"}
+    unverified  = {k: v for k, v in applicant_v.items() if v.get("status") == "unverified"}
+    missing     = {k: v for k, v in applicant_v.items() if v.get("status") == "missing"}
+
+    spouse_conflicts  = {k: v for k, v in spouse_v.items() if v.get("status") == "conflict" and not v.get("acknowledged")}
+    spouse_verified   = {k: v for k, v in spouse_v.items() if v.get("status") == "verified"}
+
+    return {
+        "has_conflicts":          len(conflicts) > 0,
+        "conflict_count":         len(conflicts),
+        "verified_count":         len(verified),
+        "unverified_count":       len(unverified),
+        "missing_count":          len(missing),
+        "conflicts":              conflicts,
+        "verified":               verified,
+        "unverified":             unverified,
+        "missing":                missing,
+        "spouse_has_conflicts":   len(spouse_conflicts) > 0,
+        "spouse_conflict_count":  len(spouse_conflicts),
+        "spouse_conflicts":       spouse_conflicts,
+        "spouse_verified":        spouse_verified,
+        "all":                    verification,
+    }
+
+
+class SyncActionRequest(BaseModel):
+    field_key: str
+    action: str   # "accept_document" | "keep_profile" | "acknowledge"
+
+
+@app.post(f"{v1}/profile/sync-action", tags=["Profile"])
+async def sync_action(
+    request: SyncActionRequest,
+    current_user: UserDB = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Resolve a field conflict:
+    - accept_document: update profile field to match document value
+    - keep_profile:    mark conflict as acknowledged (user says profile is correct)
+    - acknowledge:     dismiss without changing either value
+    """
+    from sqlalchemy.orm.attributes import flag_modified
+    from datetime import date as _date
+
+    # Load with relationships eager to avoid MissingGreenlet on lazy access
+    applicant_db_full = await _get_applicant_full(current_user.id, db)
+    verification = dict(applicant_db_full.profile_verification or {})
+    field = verification.get(request.field_key)
+
+    if not field:
+        raise HTTPException(status_code=404, detail=f"Field '{request.field_key}' not in verification state")
+
+    doc_value = field.get("doc_value", "")
+
+    if request.action == "accept_document":
+        # Update the actual profile field to match document
+        field_map = {
+            "passport_number":    ("passport_number",    "str"),
+            "passport_expiry":    ("passport_expiry_date", "date"),
+            "lang_listening":     ("_lang_listening",    "lang"),
+            "lang_reading":       ("_lang_reading",      "lang"),
+            "lang_writing":       ("_lang_writing",      "lang"),
+            "lang_speaking":      ("_lang_speaking",     "lang"),
+            "lang_test_date":     ("_lang_test_date",    "lang_date"),
+        }
+        mapped = field_map.get(request.field_key)
+
+        # ── Spouse language score fields ──────────────────────────
+        if request.field_key.startswith("spouse_lang_"):
+            skill = request.field_key.replace("spouse_lang_", "")
+            spouse_test = applicant_db_full.spouse_language_test
+            if skill == "test_date":
+                if spouse_test and doc_value:
+                    try:
+                        from datetime import date as _date2
+                        spouse_test.test_date = _date2.fromisoformat(doc_value)
+                        logger.info(f"sync_action: spouse test_date updated to {doc_value}")
+                    except Exception as e:
+                        logger.warning(f"sync_action: could not update spouse test_date: {e}")
+            elif spouse_test and skill in ("listening", "reading", "writing", "speaking"):
+                try:
+                    setattr(spouse_test, skill, float(doc_value))
+                    # Recalculate spouse CLB
+                    from core.application.services.crs_calculator import CrsCalculatorService
+                    from core.domain.models import LanguageTest as LT, LanguageTestType
+                    tmp = LT()
+                    tmp.test_type = LanguageTestType(spouse_test.test_type.lower())
+                    tmp.reading   = spouse_test.reading
+                    tmp.writing   = spouse_test.writing
+                    tmp.speaking  = spouse_test.speaking
+                    tmp.listening = spouse_test.listening
+                    clb = CrsCalculatorService().convert_to_clb(tmp)
+                    spouse_test.clb_reading   = clb.reading
+                    spouse_test.clb_writing   = clb.writing
+                    spouse_test.clb_speaking  = clb.speaking
+                    spouse_test.clb_listening = clb.listening
+                    logger.info(f"sync_action: spouse {skill}={doc_value}  CLB recalculated")
+                except Exception as e:
+                    logger.warning(f"sync_action: could not update spouse {skill}: {e}")
+            else:
+                logger.warning(f"sync_action: no spouse language test found for skill '{skill}'")
+
+        elif mapped:
+            attr, typ = mapped
+            try:
+                if typ == "str":
+                    setattr(applicant, attr, doc_value)
+                elif typ == "date" and doc_value:
+                    setattr(applicant, attr, _date.fromisoformat(doc_value))
+                elif typ == "lang":
+                    # Use eagerly-loaded applicant to avoid lazy relationship issues
+                    skill = request.field_key.replace("lang_", "")
+                    lang_tests = applicant_db_full.language_tests or []
+                    primary = next((t for t in lang_tests if t.role == "first"), lang_tests[0] if lang_tests else None)
+                    if primary:
+                        setattr(primary, skill, float(doc_value))
+                        # Recalculate CLB after score change
+                        from core.application.services.crs_calculator import CrsCalculatorService
+                        from core.domain.models import LanguageTest as LT, LanguageTestType
+                        tmp = LT()
+                        tmp.test_type = LanguageTestType(primary.test_type.lower())
+                        tmp.reading = primary.reading; tmp.writing = primary.writing
+                        tmp.speaking = primary.speaking; tmp.listening = primary.listening
+                        clb = CrsCalculatorService().convert_to_clb(tmp)
+                        primary.clb_reading = clb.reading; primary.clb_writing = clb.writing
+                        primary.clb_speaking = clb.speaking; primary.clb_listening = clb.listening
+                        logger.info(f"sync_action: updated {skill}={doc_value} CLB L={clb.listening} R={clb.reading} W={clb.writing} S={clb.speaking}")
+                elif typ == "lang_date" and doc_value:
+                    lang_tests = applicant_db_full.language_tests or []
+                    primary = next((t for t in lang_tests if t.role == "first"), lang_tests[0] if lang_tests else None)
+                    if primary:
+                        primary.test_date = _date.fromisoformat(doc_value)
+                        logger.info(f"sync_action: updated test_date={doc_value}")
+            except Exception as e:
+                logger.warning(f"sync_action: could not apply field {request.field_key}: {e}")
+
+        field["status"] = "verified"
+        field["profile_value"] = doc_value
+        field["acknowledged"] = True
+        field["resolution"] = "accepted_document"
+        logger.info(f"sync_action: accepted document value for {request.field_key}={doc_value}  user={current_user.id}")
+
+    elif request.action in ("keep_profile", "acknowledge"):
+        field["acknowledged"] = True
+        field["resolution"] = request.action
+        logger.info(f"sync_action: {request.action} for {request.field_key}  user={current_user.id}")
+
+    verification[request.field_key] = field
+    applicant_db_full.profile_verification = verification
+    flag_modified(applicant_db_full, "profile_verification")
+    await db.commit()
+
+    return {"ok": True, "field": request.field_key, "action": request.action, "new_status": field["status"]}
+
+
+# ─────────────────────────────────────────────
+# IRCC Verified Data — Pre-fill Review
+# ─────────────────────────────────────────────
+
+@app.get(f"{v1}/profile/ircc-verified", tags=["Profile"])
+async def get_ircc_verified_profile(
+    current_user: UserDB = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Returns reconciled profile data tiered by verification status.
+    Each field has a status: 'verified' | 'unverified' | 'conflict' | 'missing'
+    
+    - verified:   profile and document agree → safe to autofill
+    - unverified: profile entry but no document uploaded → fill with caution
+    - conflict:   profile and document disagree → block autofill, user must resolve
+    - missing:    document uploaded but no matching profile entry → must add to profile
+    """
+    from sqlalchemy.orm.attributes import flag_modified
+
+    applicant_db = await _get_applicant_full(current_user.id, db)
+    if not applicant_db:
+        raise HTTPException(status_code=404, detail="Profile not found")
+
+    # Load all reviewed documents
+    docs_result = await db.execute(
+        select(ApplicationDocumentDB)
+        .where(
+            ApplicationDocumentDB.applicant_id == applicant_db.id,
+            ApplicationDocumentDB.status == "ai_reviewed"
+        )
+    )
+    docs = docs_result.scalars().all()
+
+    # Index documents by type
+    def get_doc(doc_type):
+        return next((d for d in docs if d.document_type == doc_type), None)
+
+    def extracted(doc, key):
+        """Get extracted field value from AI review, ignore internal keys"""
+        if not doc or not doc.ai_extracted_fields:
+            return None
+        v = doc.ai_extracted_fields.get(key)
+        return str(v).strip() if v else None
+
+    def field(status, profile_val, doc_val=None, message=None):
+        return {
+            "status": status,        # verified | unverified | conflict | missing
+            "value": profile_val,    # value to fill (always profile or resolved value)
+            "profile_value": profile_val,
+            "doc_value": doc_val,
+            "message": message,
+        }
+
+    fields = {}
+
+    # ── PASSPORT ─────────────────────────────────────────────────
+    passport_doc = get_doc("passport")
+    p_num    = applicant_db.passport_number or ""
+    p_coi    = applicant_db.passport_country_of_issue or ""
+    p_issue  = applicant_db.passport_issue_date.isoformat() if applicant_db.passport_issue_date else ""
+    p_expiry = applicant_db.passport_expiry_date.isoformat() if applicant_db.passport_expiry_date else ""
+
+    d_num    = extracted(passport_doc, "document_number")
+    d_expiry = extracted(passport_doc, "date_of_expiry")
+
+    if passport_doc:
+        if d_num and p_num and d_num.replace(" ", "").upper() != p_num.replace(" ", "").upper():
+            fields["passport_number"] = field("conflict", p_num, d_num,
+                f"Profile: '{p_num}' vs Document: '{d_num}' — update profile to match passport")
+        elif d_num:
+            fields["passport_number"] = field("verified", d_num or p_num, d_num)
+        else:
+            fields["passport_number"] = field("unverified", p_num, None, "No passport uploaded")
+        
+        if d_expiry:
+            fields["passport_expiry"] = field("verified", d_expiry, d_expiry)
+        else:
+            fields["passport_expiry"] = field("unverified", p_expiry, None)
+    else:
+        fields["passport_number"] = field("unverified" if p_num else "missing", p_num, None,
+            "Upload passport to verify" if p_num else "Add passport number to profile and upload passport")
+        fields["passport_expiry"] = field("unverified" if p_expiry else "missing", p_expiry)
+
+    # ── LANGUAGE TEST ─────────────────────────────────────────────
+    lang_tests = applicant_db.language_tests or []
+    primary_lt = next((t for t in lang_tests if t.role == "first"), lang_tests[0] if lang_tests else None)
+    lang_doc   = get_doc("language_test_result")
+
+    for skill in ["listening", "reading", "writing", "speaking"]:
+        prof_val = str(getattr(primary_lt, skill, "") or "") if primary_lt else ""
+        doc_val  = extracted(lang_doc, skill)
+
+        if not primary_lt:
+            fields[f"lang_{skill}"] = field("missing", "", None, "Add language test to profile")
+        elif lang_doc and doc_val:
+            try:
+                diff = abs(float(doc_val) - float(prof_val))
+                if diff >= 0.5:
+                    fields[f"lang_{skill}"] = field(
+                        "conflict", prof_val, doc_val,
+                        f"Profile: {prof_val} vs TRF: {doc_val} — TRF is the authoritative value"
+                    )
+                else:
+                    fields[f"lang_{skill}"] = field("verified", doc_val, doc_val)
+            except (ValueError, TypeError):
+                fields[f"lang_{skill}"] = field("unverified", prof_val, doc_val)
+        elif lang_doc:
+            fields[f"lang_{skill}"] = field("unverified", prof_val, None,
+                "AI could not extract score from document — verify manually")
+        else:
+            fields[f"lang_{skill}"] = field("unverified", prof_val, None, "No language test uploaded")
+
+    # Language test date
+    prof_test_date = primary_lt.test_date.isoformat() if primary_lt and primary_lt.test_date else ""
+    doc_test_date  = extracted(lang_doc, "test_date")
+    if lang_doc and doc_test_date and prof_test_date and doc_test_date != prof_test_date:
+        fields["lang_test_date"] = field("conflict", prof_test_date, doc_test_date,
+            f"Profile: {prof_test_date} vs Document: {doc_test_date}")
+    elif doc_test_date:
+        fields["lang_test_date"] = field("verified", doc_test_date, doc_test_date)
+    else:
+        fields["lang_test_date"] = field("unverified", prof_test_date)
+
+    # Certificate number
+    cert_num = primary_lt.registration_number if primary_lt else ""
+    doc_cert = extracted(lang_doc, "registration_number")
+    fields["lang_certificate"] = field(
+        "verified" if (doc_cert or cert_num) else "missing",
+        doc_cert or cert_num, doc_cert
+    )
+
+    # ── WORK EXPERIENCE ───────────────────────────────────────────
+    work_exps   = applicant_db.work_experiences or []
+    emp_docs    = [d for d in docs if d.document_type == "employment_letter"]
+    
+    fields["work_experience"] = {
+        "status": "ok",
+        "profile_count": len(work_exps),
+        "document_count": len(emp_docs),
+        "entries": [],
+        "conflicts": [],
+        "missing_docs": [],
+        "undeclared_jobs": [],
+    }
+
+    # Check each profile work entry has a supporting document
+    # Track which docs are already matched so we don't double-count
+    matched_doc_ids = set()
+
+    for w in work_exps:
+        matching_doc = None
+        prof_name = (w.employer_name or "").lower().strip()
+
+        for d in emp_docs:
+            if str(d.id) in matched_doc_ids:
+                continue
+            # Try multiple extracted field names AI might use
+            doc_emp = (
+                extracted(d, "employer_name") or
+                extracted(d, "company_name") or
+                extracted(d, "organization") or
+                extracted(d, "employer") or
+                ""
+            ).lower().strip()
+
+            if not doc_emp:
+                # No employer extracted — match by doc count fallback
+                # (if counts match we assume docs cover all jobs)
+                continue
+
+            # Match strategies: exact, substring, first significant word
+            def significant_words(s):
+                stop = {"the", "of", "and", "&", "ltd", "limited", "pvt", "inc",
+                        "llc", "corp", "corporation", "technologies", "technology",
+                        "solutions", "services", "consulting", "group", "co"}
+                return [w for w in s.split() if len(w) > 2 and w not in stop]
+
+            prof_words = significant_words(prof_name)
+            doc_words  = significant_words(doc_emp)
+
+            match = (
+                prof_name in doc_emp or
+                doc_emp in prof_name or
+                (prof_words and doc_words and prof_words[0] == doc_words[0]) or
+                any(pw in doc_words for pw in prof_words if len(pw) > 3) or
+                any(dw in prof_words for dw in doc_words if len(dw) > 3)
+            )
+
+            if match:
+                matching_doc = d
+                matched_doc_ids.add(str(d.id))
+                break
+
+        # Fallback: if doc count == work count and all unmatched, assign sequentially
+        if not matching_doc and len(emp_docs) == len(work_exps):
+            unmatched_docs = [d for d in emp_docs if str(d.id) not in matched_doc_ids]
+            if unmatched_docs:
+                matching_doc = unmatched_docs[0]
+                matched_doc_ids.add(str(matching_doc.id))
+
+        entry = {
+            "employer": w.employer_name,
+            "noc_code": w.noc_code,
+            "start_date": w.start_date.isoformat() if w.start_date else "",
+            "end_date": w.end_date.isoformat() if w.end_date else "",
+            "is_current": w.is_current,
+            "has_document": matching_doc is not None,
+            "status": "verified" if matching_doc else "unverified",
+        }
+        fields["work_experience"]["entries"].append(entry)
+        if not matching_doc:
+            fields["work_experience"]["missing_docs"].append(w.employer_name)
+
+    # Check if there are more employment documents than profile entries
+    if len(emp_docs) > len(work_exps):
+        extra = len(emp_docs) - len(work_exps)
+        fields["work_experience"]["undeclared_jobs"] = [
+            f"You have {len(emp_docs)} employment documents but only {len(work_exps)} work entries. "
+            f"Add the missing {extra} job(s) to your profile before filling IRCC."
+        ]
+        fields["work_experience"]["status"] = "conflict"
+    elif len(work_exps) > 0 and len(emp_docs) == 0:
+        fields["work_experience"]["status"] = "unverified"
+    elif len(emp_docs) == len(work_exps) and len(work_exps) > 0:
+        # Same count — documents cover all jobs (even if names didn't exactly match)
+        fields["work_experience"]["status"] = "verified"
+        fields["work_experience"]["missing_docs"] = []  # clear false positives
+        for e in fields["work_experience"]["entries"]:
+            e["has_document"] = True
+            e["status"] = "verified"
+    elif all(e["has_document"] for e in fields["work_experience"]["entries"]):
+        fields["work_experience"]["status"] = "verified"
+    else:
+        fields["work_experience"]["status"] = "partial"
+
+    # ── EDUCATION ─────────────────────────────────────────────────
+    edu = applicant_db.education
+    fields["education"] = field(
+        "verified" if (edu and get_doc("education_credential")) else
+        "unverified" if edu else "missing",
+        edu.level if edu else "",
+        None,
+        None if get_doc("education_credential") else "Upload education credential to verify"
+    )
+
+    # ── PERSONAL ─────────────────────────────────────────────────
+    fields["city_of_birth"] = field(
+        "verified" if applicant_db.city_of_birth else "missing",
+        applicant_db.city_of_birth or "",
+        None,
+        None if applicant_db.city_of_birth else "Add city of birth in Profile → Personal"
+    )
+
+    # ── SUMMARY COUNTS ────────────────────────────────────────────
+    flat_fields = {k: v for k, v in fields.items() if k != "work_experience" and isinstance(v, dict) and "status" in v}
+    summary = {
+        "verified":   sum(1 for f in flat_fields.values() if f["status"] == "verified"),
+        "unverified": sum(1 for f in flat_fields.values() if f["status"] == "unverified"),
+        "conflict":   sum(1 for f in flat_fields.values() if f["status"] == "conflict"),
+        "missing":    sum(1 for f in flat_fields.values() if f["status"] == "missing"),
+    }
+    if fields["work_experience"]["status"] == "conflict":
+        summary["conflict"] += 1
+    elif fields["work_experience"]["status"] == "unverified":
+        summary["unverified"] += 1
+
+    safe_to_fill = summary["conflict"] == 0
+
+    return {
+        "safe_to_fill": safe_to_fill,
+        "summary": summary,
+        "fields": fields,
+        "message": (
+            "Ready to fill — all fields verified or unverified." if safe_to_fill
+            else f"{summary['conflict']} conflict(s) must be resolved before filling IRCC."
+        ),
+        "conflicts": [
+            {"field": k, "message": v.get("message", ""), "profile_value": v.get("profile_value"), "doc_value": v.get("doc_value")}
+            for k, v in flat_fields.items() if v["status"] == "conflict"
+        ] + (
+            [{"field": "work_experience", "message": msg}
+             for msg in fields["work_experience"].get("undeclared_jobs", [])]
+        ),
     }
 
 
@@ -4792,38 +5414,68 @@ async def check_eligibility(
 ):
     """Full eligibility check for FSW, CEC, FST with gap analysis."""
     try:
-        applicant = await _get_applicant_full(current_user.id, db)
-        tests  = applicant.language_tests or []
-        works  = applicant.work_experiences or []
-        primary = next((t for t in tests if t.role == "first"), None)
+        applicant_db = await _get_applicant_full(current_user.id, db)
+        # Convert DB model to domain so language tests have clb_equivalent properly set
+        applicant_domain_full = _db_to_domain(applicant_db)
+        tests  = applicant_domain_full.language_tests or []
+        works  = applicant_domain_full.work_experiences or []
+        primary = next((t for t in tests if t.role.value == "first"), None)
 
-        avg_clb = int((primary.clb_reading + primary.clb_writing +
-                       primary.clb_listening + primary.clb_speaking) / 4) if primary and primary.clb_reading else 0
+        def _work_type(w, t):
+            et = w.experience_type
+            val = et.value if hasattr(et, 'value') else str(et)
+            return val == t
 
         cdn_work = sum(
             ((w.end_date or _date.today()) - w.start_date).days / 365
-            for w in works if w.experience_type == "canadian"
+            for w in works if _work_type(w, "canadian")
         )
         foreign_work = sum(
             ((w.end_date or _date.today()) - w.start_date).days / 365
-            for w in works if w.experience_type == "foreign"
+            for w in works if _work_type(w, "foreign")
         )
+        total_work = cdn_work + foreign_work
 
         from datetime import date as _d
-        age = (_d.today() - applicant.date_of_birth).days // 365 if applicant.date_of_birth else 30
+        a = applicant_domain_full
+        age = (_d.today() - a.date_of_birth).days // 365 if a.date_of_birth else 30
 
-        teer = works[0].teer_level if works else ""
+        teer = works[0].teer_level.value if works and hasattr(works[0].teer_level, 'value') else (works[0].teer_level if works else "")
+
+        # Pass per-skill CLB so language points are calculated correctly per IRCC table
+        clb = primary.clb_equivalent if primary else None
+        second = next((t for t in tests if t.role.value == "second"), None)
+        second_clb = second.clb_equivalent if second else None
+
+        edu_level = a.education.level.value if a.education and hasattr(a.education.level, 'value') else (a.education.level if a.education else "")
 
         profile = {
             "age": age,
-            "education_level": applicant.education.level if applicant.education else "",
+            "education_level": edu_level,
             "canadian_work_years": round(cdn_work, 1),
             "foreign_work_years": round(foreign_work, 1),
-            "language_clb": avg_clb,
+            "total_work_years": round(total_work, 1),
+            # Per-skill CLB for accurate language scoring
+            "clb_listening":  getattr(clb, "listening", 0) or 0,
+            "clb_reading":    getattr(clb, "reading", 0) or 0,
+            "clb_writing":    getattr(clb, "writing", 0) or 0,
+            "clb_speaking":   getattr(clb, "speaking", 0) or 0,
+            # Second language (max 4 pts if all skills >= CLB 5)
+            "clb2_listening": getattr(second_clb, "listening", 0) or 0,
+            "clb2_reading":   getattr(second_clb, "reading", 0) or 0,
+            "clb2_writing":   getattr(second_clb, "writing", 0) or 0,
+            "clb2_speaking":  getattr(second_clb, "speaking", 0) or 0,
+            # Keep min clb for language minimum check
+            "language_clb": min(
+                getattr(clb,"listening",0), getattr(clb,"reading",0),
+                getattr(clb,"writing",0), getattr(clb,"speaking",0)
+            ) if clb else 0,
             "teer_level": teer,
-            "has_job_offer": applicant.job_offer is not None,
-            "has_certificate_of_qualification": applicant.has_certificate_of_qualification,
-            "nationality": applicant.nationality,
+            "has_job_offer": a.job_offer is not None,
+            "has_certificate_of_qualification": a.has_certificate_of_qualification,
+            "has_sibling_in_canada": a.has_sibling_in_canada,
+            "is_canadian_education": a.education.is_canadian if a.education else False,
+            "nationality": a.nationality,
         }
 
         # Step 1: deterministic checks

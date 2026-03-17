@@ -5,7 +5,7 @@ import { useState, useCallback } from 'react'
 import { useDropzone } from 'react-dropzone'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
-  Upload, FileText, CheckCircle2, AlertTriangle, Clock, Loader2,
+  Upload, FileText, CheckCircle2, AlertTriangle, Clock, Loader2, RefreshCw,
   Eye, Trash2, Bot, User, Users, Baby, ChevronDown, X,
   ShieldAlert, Info, FileCheck, Calendar, HardDrive, Fingerprint,
   Sparkles, Brain, ExternalLink, XCircle
@@ -160,6 +160,73 @@ function DropZone({ selectedType, personLabel, uploading, onUpload }) {
   )
 }
 
+function DocThumbnail({ doc, docType }) {
+  const [previewUrl, setPreviewUrl] = React.useState(null)
+  const [loading, setLoading] = React.useState(false)
+
+  React.useEffect(() => {
+    const isImage = doc.mime_type?.startsWith('image/')
+    const isPdf = doc.mime_type === 'application/pdf'
+    if (!isImage && !isPdf) return
+    let cancelled = false
+    let objectUrl = null
+    setLoading(true)
+
+    import('../services/api').then(({ documentsAPI }) =>
+      documentsAPI.getPreview(doc.id)
+        .then(r => {
+          if (cancelled) return
+          const blob = new Blob([r.data], { type: doc.mime_type })
+          objectUrl = URL.createObjectURL(blob)
+          setPreviewUrl(objectUrl)
+        })
+        .catch(() => {})
+        .finally(() => { if (!cancelled) setLoading(false) })
+    )
+    return () => {
+      cancelled = true
+      if (objectUrl) URL.revokeObjectURL(objectUrl)
+    }
+  }, [doc.id, doc.mime_type])
+
+  const isImage = doc.mime_type?.startsWith('image/')
+  const isPdf = doc.mime_type === 'application/pdf'
+
+  if (loading) return (
+    <div className="w-16 h-20 bg-slate-800 rounded-xl flex items-center justify-center flex-shrink-0 border border-slate-700">
+      <Loader2 size={14} className="text-slate-600 animate-spin" />
+    </div>
+  )
+
+  if (isImage && previewUrl) return (
+    <div className="w-16 h-20 rounded-xl overflow-hidden flex-shrink-0 border border-slate-700">
+      <img src={previewUrl} alt="" className="w-full h-full object-cover" />
+    </div>
+  )
+
+  if (isPdf && previewUrl) return (
+    <div className="w-16 h-20 rounded-xl overflow-hidden flex-shrink-0 border border-slate-700 bg-slate-800 relative">
+      <object
+        data={`${previewUrl}#toolbar=0&navpanes=0&scrollbar=0&page=1`}
+        type="application/pdf"
+        style={{ width: '200%', height: '200%', transform: 'scale(0.5)', transformOrigin: 'top left', pointerEvents: 'none' }}
+      >
+        <span className="text-2xl absolute inset-0 flex items-center justify-center">{docType?.icon || '📄'}</span>
+      </object>
+      <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-slate-900/90 to-transparent py-0.5 flex justify-center">
+        <span className="text-[8px] text-red-400 font-bold">PDF</span>
+      </div>
+    </div>
+  )
+
+  return (
+    <div className="w-16 h-20 bg-slate-800 rounded-xl flex flex-col items-center justify-center flex-shrink-0 border border-slate-700 gap-1">
+      <span className="text-2xl">{docType?.icon || '📄'}</span>
+      <span className="text-[8px] text-slate-600 uppercase tracking-wide">{isPdf ? 'PDF' : isImage ? 'IMG' : 'DOC'}</span>
+    </div>
+  )
+}
+
 function DocumentCard({ doc, onViewDetails, onDelete }) {
   const status  = resolveStatus(doc)
   const cfg     = STATUS_CONFIG[status] || STATUS_CONFIG.pending
@@ -207,9 +274,7 @@ function DocumentCard({ doc, onViewDetails, onDelete }) {
       onClick={() => onViewDetails(doc)}
     >
       <div className="flex items-start gap-4">
-        <div className="w-12 h-14 bg-slate-800 rounded-xl flex items-center justify-center text-2xl flex-shrink-0 border border-slate-700">
-          {docType?.icon || '📄'}
-        </div>
+        <DocThumbnail doc={doc} docType={docType} />
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 flex-wrap">
             <p className="font-semibold text-white text-sm truncate max-w-xs">{doc.file_name}</p>
@@ -283,6 +348,19 @@ function DocumentCard({ doc, onViewDetails, onDelete }) {
 }
 
 function DocumentDetailModal({ doc, profile, onClose }) {
+  const qc = useQueryClient()
+  const reReview = useMutation(
+    () => documentsAPI.reReview(doc?.id),
+    {
+      onSuccess: () => {
+        toast.success('Re-analysis started — results in ~30 seconds')
+        qc.invalidateQueries('documents')
+        onClose()
+      },
+      onError: (err) => toast.error(err?.response?.data?.detail || 'Re-review failed')
+    }
+  )
+
   if (!doc) return null
   const docType  = DOC_TYPES.find(t => t.value === doc.document_type)
   const status   = resolveStatus(doc)
@@ -319,7 +397,20 @@ function DocumentDetailModal({ doc, profile, onClose }) {
               <p className="text-xs text-slate-400">{docType?.label || doc.document_type}</p>
             </div>
           </div>
-          <button onClick={onClose} className="text-slate-500 hover:text-white p-1"><X size={18} /></button>
+          <div className="flex items-center gap-2">
+            {(doc.ai_issues?.length > 0 || doc.ai_extracted_fields?._must_fix?.length > 0) && (
+              <button
+                onClick={() => reReview.mutate()}
+                disabled={reReview.isLoading || status === 'ai_processing'}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-600/20 hover:bg-emerald-600/30 border border-emerald-500/30 text-emerald-400 text-xs font-semibold transition-all disabled:opacity-50"
+                title="Re-run AI analysis after fixing profile issues"
+              >
+                {reReview.isLoading ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
+                Re-review
+              </button>
+            )}
+            <button onClick={onClose} className="text-slate-500 hover:text-white p-1"><X size={18} /></button>
+          </div>
         </div>
 
         <div className="p-5 space-y-4">
@@ -531,6 +622,27 @@ function DocumentDetailModal({ doc, profile, onClose }) {
               </div>
             )
           })()}
+
+          {/* Re-review banner — shown when there are issues and user may have fixed profile */}
+          {((doc.ai_extracted_fields?._must_fix?.length > 0) || (doc.ai_issues?.length > 0)) && status === 'ai_reviewed' && (
+            <div className="p-3 rounded-xl bg-emerald-900/20 border border-emerald-700/30 flex items-center justify-between gap-3">
+              <div className="flex items-start gap-2">
+                <RefreshCw size={14} className="text-emerald-400 mt-0.5 flex-shrink-0" />
+                <div>
+                  <p className="text-xs font-semibold text-emerald-400">Fixed your profile?</p>
+                  <p className="text-xs text-slate-400 mt-0.5">After updating your profile to match this document, click Re-review to clear resolved issues.</p>
+                </div>
+              </div>
+              <button
+                onClick={() => reReview.mutate()}
+                disabled={reReview.isLoading}
+                className="flex-shrink-0 flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold transition-all disabled:opacity-50"
+              >
+                {reReview.isLoading ? <Loader2 size={11} className="animate-spin" /> : <RefreshCw size={11} />}
+                Re-review
+              </button>
+            </div>
+          )}
 
           {/* Issues list */}
           {(doc.ai_issues || []).length > 0 ? (

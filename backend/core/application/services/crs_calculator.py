@@ -93,12 +93,12 @@ SPOUSE_EDUCATION_POINTS = {
 
 # Spouse language points per CLB band
 SPOUSE_LANG_POINTS = {
-    4: 1, 5: 1, 6: 1, 7: 3, 8: 3, 9: 5, 10: 5
+    4: 0, 5: 1, 6: 1, 7: 3, 8: 3, 9: 5, 10: 5  # CLB4 = 0 per IRCC table
 }
 
 # Spouse Canadian work experience points
 SPOUSE_CDN_WORK_POINTS = {
-    0: 0, 1: 5, 2: 7, 3: 8, 4: 10, 5: 10
+    0: 0, 1: 5, 2: 7, 3: 8, 4: 9, 5: 10  # 4 yrs = 9 per IRCC table
 }
 
 
@@ -427,8 +427,9 @@ class CrsCalculatorService:
         if applicant.has_provincial_nomination:
             result["pnp"] = 600
 
-        if applicant.job_offer:
-            result["job_offer"] = applicant.job_offer.points
+        # Job offer points removed from CRS as of March 25, 2025
+        # See: https://www.canada.ca/en/immigration-refugees-citizenship/services/immigrate-canada/express-entry/check-score/crs-criteria.html
+        # result["job_offer"] = 0  (always 0 now)
 
         if applicant.education and applicant.education.is_canadian:
             result["cdn_education"] = 30 if applicant.education.is_three_year_or_more else 15

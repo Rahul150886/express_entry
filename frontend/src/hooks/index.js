@@ -110,17 +110,19 @@ export function useDrawStats() {
 
 // ─── Cases ────────────────────────────────────
 export function useActiveCase() {
-  return useQuery('active-case', () => casesAPI.getActive().then(r => r.data), {
-    onSuccess: (data) => log.info('useActiveCase', `loaded: case_id=${data?.id}  status=${data?.status}`),
-    onError: (err) => {
-      if (err?.response?.status === 404) {
-        log.info('useActiveCase', 'no active case (404 — expected for new users)')
-      } else {
-        log.error('useActiveCase', 'fetch failed', err?.response?.data)
-      }
-    },
-    retry: false,
-  })
+  return useQuery('active-case',
+    () => casesAPI.getActive().then(r => r.data).catch(err => {
+      if (err?.response?.status === 404) return null  // No ITA yet — expected
+      throw err
+    }),
+    {
+      onSuccess: (data) => {
+        if (data) log.info('useActiveCase', `loaded: case_id=${data?.case?.id}`)
+      },
+      onError: (err) => log.error('useActiveCase', 'unexpected error', err?.response?.data),
+      retry: false,
+    }
+  )
 }
 
 // ─── Notifications ────────────────────────────

@@ -4,13 +4,129 @@ import React from 'react'
 import { useState, useEffect } from 'react'
 import { useForm } from 'react-hook-form'
 import { motion, AnimatePresence } from 'framer-motion'
-import { User, Users, Languages, Briefcase, GraduationCap, Award, Check, Loader2, Plus, Trash2, ChevronRight, ChevronDown, Search } from 'lucide-react'
+import { User, Users, Languages, Briefcase, GraduationCap, Award, Check, Loader2, Plus, Trash2, ChevronRight, ChevronDown, Search, AlertCircle, CheckCircle2, XCircle, RefreshCw } from 'lucide-react'
 import toast from 'react-hot-toast'
 import { useMutation, useQuery, useQueryClient } from 'react-query'
 import { profileAPI, aiAPI } from '../services/api'
 import log from '../services/logger'
 import { useProfile, useCrs } from '../hooks'
 import clsx from 'clsx'
+
+// ─── Sync status hook ──────────────────────────────────────────
+function useSyncStatus() {
+  return useQuery('profile-sync', () => profileAPI.getSyncStatus().then(r => r.data), {
+    refetchInterval: 10000,   // Poll every 10s — catches re-review results quickly
+    staleTime: 0,             // Always refetch — verification state can change any time
+    retry: false,
+    onError: () => {}
+  })
+}
+
+// ─── Inline field conflict badge ──────────────────────────────
+function FieldConflict({ fieldKey, syncStatus, onResolved }) {
+  const qc = useQueryClient()
+  const conflict = syncStatus?.conflicts?.[fieldKey]
+  const resolve = useMutation(
+    (action) => profileAPI.syncAction({ field_key: fieldKey, action }).then(r => r.data),
+    {
+      onSuccess: (data, action) => {
+        // Invalidate everything that depends on profile or verification state
+        qc.invalidateQueries('profile-sync')
+        qc.invalidateQueries('profile')
+        if (action === 'accept_document') {
+          // Score changed — recalculate CRS
+          qc.invalidateQueries('crs-history')
+          qc.invalidateQueries('crs-improvements')
+          toast.success('Profile updated to match document')
+        } else {
+          toast.success('Conflict dismissed')
+        }
+        if (onResolved) onResolved()
+      },
+      onError: (err) => toast.error(err?.response?.data?.detail || 'Could not sync field')
+    }
+  )
+  if (!conflict || conflict.acknowledged) return null
+  return (
+    <div className="mt-1.5 p-2.5 rounded-lg bg-red-950/30 border border-red-700/40 text-xs">
+      <div className="flex items-start gap-2">
+        <AlertCircle size={12} className="text-red-400 mt-0.5 flex-shrink-0" />
+        <div className="flex-1">
+          <p className="text-red-400 font-semibold mb-1">{conflict.message}</p>
+          <div className="flex items-center gap-3 text-[11px] mb-2">
+            <span className="text-slate-400">Profile: <strong className="text-white font-mono">{conflict.profile_value || '—'}</strong></span>
+            <span className="text-slate-500">vs</span>
+            <span className="text-slate-400">Document: <strong className="text-emerald-400 font-mono">{conflict.doc_value || '—'}</strong></span>
+          </div>
+          <div className="flex gap-2">
+            <button
+              onClick={() => resolve.mutate('accept_document')}
+              disabled={resolve.isLoading}
+              className="flex items-center gap-1 px-2.5 py-1 rounded-md bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-semibold transition-colors disabled:opacity-50"
+            >
+              {resolve.isLoading ? <Loader2 size={10} className="animate-spin" /> : <CheckCircle2 size={10} />}
+              Use document value ({conflict.doc_value})
+            </button>
+            <button
+              onClick={() => resolve.mutate('keep_profile')}
+              disabled={resolve.isLoading}
+              className="flex items-center gap-1 px-2.5 py-1 rounded-md bg-slate-700 hover:bg-slate-600 text-slate-300 text-[11px] font-semibold transition-colors disabled:opacity-50"
+            >
+              <XCircle size={10} /> Keep mine
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ─── Summary banner at top of Profile page ────────────────────
+function SyncStatusBanner({ syncStatus }) {
+  const hasApplicantConflicts = syncStatus?.has_conflicts
+  const hasSpouseConflicts    = syncStatus?.spouse_has_conflicts
+
+  if (!hasApplicantConflicts && !hasSpouseConflicts) return null
+  return (
+    <div className="space-y-2 mb-4">
+      {hasApplicantConflicts && (
+        <div className="p-3 rounded-xl bg-red-950/30 border border-red-700/40 flex items-start gap-3">
+          <AlertCircle size={16} className="text-red-400 mt-0.5 flex-shrink-0" />
+          <div className="flex-1">
+            <p className="text-sm font-semibold text-red-400">
+              {syncStatus.conflict_count} profile conflict{syncStatus.conflict_count > 1 ? 's' : ''} — resolve before submitting to IRCC
+            </p>
+            <p className="text-xs text-slate-400 mt-0.5">Your uploaded documents contradict your profile. IRCC officers verify everything — mismatches cause rejection.</p>
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              {Object.keys(syncStatus.conflicts || {}).map(key => (
+                <span key={key} className="text-[10px] px-2 py-0.5 rounded-full bg-red-900/40 border border-red-700/30 text-red-400">
+                  {key.replace(/_/g, ' ')}
+                </span>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+      {hasSpouseConflicts && (
+        <div className="p-3 rounded-xl bg-amber-950/30 border border-amber-700/40 flex items-start gap-3">
+          <AlertCircle size={16} className="text-amber-400 mt-0.5 flex-shrink-0" />
+          <div className="flex-1">
+            <p className="text-sm font-semibold text-amber-400">
+              {syncStatus.spouse_conflict_count} spouse document conflict{syncStatus.spouse_conflict_count > 1 ? 's' : ''} — go to Spouse tab to resolve
+            </p>
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              {Object.keys(syncStatus.spouse_conflicts || {}).map(key => (
+                <span key={key} className="text-[10px] px-2 py-0.5 rounded-full bg-amber-900/40 border border-amber-700/30 text-amber-400">
+                  {key.replace('spouse_', '').replace(/_/g, ' ')}
+                </span>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
 
 const BASE_STEPS = [
   { id: 'personal',  icon: User,          label: 'Personal'  },
@@ -50,17 +166,89 @@ function StepIndicator({ current, steps }) {
 }
 
 // ─── Personal Info Form ──────────────────────
-function PersonalForm({ profile, onNext }) {
+// ─── Passport read-only card from uploaded document ───────────
+function PassportFromDocument({ profile, syncStatus }) {
+  const { data: documents = [] } = useQuery(
+    'documents-passport',
+    () => import('../services/api').then(m => m.documentsAPI.getAll().then(r => r.data)),
+    { staleTime: 60000 }
+  )
+
+  const passportDoc = documents.find(d => d.document_type === 'passport' && d.status === 'ai_reviewed')
+  const fields = passportDoc?.ai_extracted_fields || {}
+
+  // Pull from extracted fields or fall back to profile DB values
+  const num     = fields.document_number      || profile?.passport_number            || ''
+  const country = fields.country_of_issue     || profile?.passport_country_of_issue  || ''
+  const expiry  = fields.date_of_expiry       || profile?.passport_expiry_date       || ''
+  const issue   = fields.date_of_issue        || profile?.passport_issue_date        || ''
+  const city    = fields.place_of_birth       || profile?.city_of_birth              || ''
+  const name    = fields.first_name && fields.last_name
+                  ? `${fields.first_name} ${fields.last_name}` : ''
+
+  const hasData = num || country || expiry
+
+  return (
+    <div className="pt-2">
+      <div className="flex items-center justify-between mb-2">
+        <p className="text-xs font-semibold text-slate-400 uppercase tracking-wider">
+          Passport Details
+        </p>
+        {passportDoc
+          ? <span className="text-[10px] text-emerald-400 flex items-center gap-1"><CheckCircle2 size={10} /> Extracted from document</span>
+          : <span className="text-[10px] text-amber-400">Upload passport to auto-populate</span>
+        }
+      </div>
+
+      {hasData ? (
+        <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+          {[
+            { label: 'Passport No.',   value: num,     mono: true },
+            { label: 'Country of Issue', value: country },
+            { label: 'Expiry Date',    value: expiry },
+            { label: 'Issue Date',     value: issue },
+            { label: 'City of Birth',  value: city },
+            { label: 'Name on Passport', value: name },
+          ].filter(f => f.value).map(f => (
+            <div key={f.label} className="p-2.5 rounded-lg bg-slate-800/60 border border-slate-700/50">
+              <p className="text-[9px] text-slate-500 uppercase tracking-wide mb-0.5">{f.label}</p>
+              <p className={`text-xs font-semibold text-white truncate ${f.mono ? 'font-mono' : ''}`}>{f.value}</p>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className="p-3 rounded-lg bg-slate-800/40 border border-slate-700/40 border-dashed text-center">
+          <p className="text-xs text-slate-500">
+            Go to <strong className="text-slate-400">Documents</strong> → upload your passport → AI will extract all details automatically
+          </p>
+        </div>
+      )}
+
+      {/* Conflict badges if passport data conflicts with profile */}
+      {syncStatus && hasData && (
+        <div className="mt-2 space-y-1">
+          <FieldConflict fieldKey="passport_number" syncStatus={syncStatus} />
+          <FieldConflict fieldKey="passport_expiry"  syncStatus={syncStatus} />
+        </div>
+      )}
+    </div>
+  )
+}
+
+function PersonalForm({ profile, syncStatus, onNext }) {
   const { register, handleSubmit, watch, formState: { isSubmitting } } = useForm({
     defaultValues: {
-      full_name: profile?.full_name || '',
-      date_of_birth: profile?.date_of_birth || '',
-      nationality: profile?.nationality || '',
-      country_of_residence: profile?.country_of_residence || '',
-      marital_status: profile?.marital_status || 'single',
-      has_spouse: profile?.has_spouse || false,
-      has_provincial_nomination: profile?.has_provincial_nomination || false,
-      has_sibling_in_canada: profile?.has_sibling_in_canada || false,
+      full_name:                    profile?.full_name || '',
+      date_of_birth:                profile?.date_of_birth || '',
+      nationality:                  profile?.nationality || '',
+      country_of_residence:         profile?.country_of_residence || '',
+      marital_status:               profile?.marital_status || 'single',
+      has_spouse:                   profile?.has_spouse || false,
+      has_provincial_nomination:    profile?.has_provincial_nomination || false,
+      has_sibling_in_canada:        profile?.has_sibling_in_canada || false,
+      province_of_destination:      profile?.province_of_destination || '',
+      passport_issue_date:          profile?.passport_issue_date || '',
+      passport_expiry_date:         profile?.passport_expiry_date || '',
     }
   })
   const qc = useQueryClient()
@@ -98,9 +286,29 @@ function PersonalForm({ profile, onNext }) {
           <label className="label">Nationality / Country of Birth</label>
           <input className="input" placeholder="e.g. India" {...register('nationality', { required: true })} />
         </div>
+
         <div>
           <label className="label">Country of Residence</label>
           <input className="input" placeholder="e.g. India" {...register('country_of_residence')} />
+        </div>
+        <div>
+          <label className="label">Province / Territory of Destination</label>
+          <select className="select" {...register('province_of_destination')}>
+            <option value="">-- Select Province --</option>
+            <option value="Ontario">Ontario</option>
+            <option value="British Columbia">British Columbia</option>
+            <option value="Alberta">Alberta</option>
+            <option value="Quebec">Quebec</option>
+            <option value="Manitoba">Manitoba</option>
+            <option value="Saskatchewan">Saskatchewan</option>
+            <option value="Nova Scotia">Nova Scotia</option>
+            <option value="New Brunswick">New Brunswick</option>
+            <option value="Newfoundland and Labrador">Newfoundland and Labrador</option>
+            <option value="Prince Edward Island">Prince Edward Island</option>
+            <option value="Northwest Territories">Northwest Territories</option>
+            <option value="Yukon">Yukon</option>
+            <option value="Nunavut">Nunavut</option>
+          </select>
         </div>
         <div>
           <label className="label">Marital Status</label>
@@ -114,6 +322,9 @@ function PersonalForm({ profile, onNext }) {
           </select>
         </div>
       </div>
+
+      {/* Passport — read-only, populated from uploaded passport document */}
+      <PassportFromDocument profile={profile} syncStatus={syncStatus} />
 
       <div className="space-y-3 pt-2">
         {['married', 'common_law'].includes(watch('marital_status')) && (
@@ -144,7 +355,7 @@ function PersonalForm({ profile, onNext }) {
 }
 
 // ─── Spouse Language Test Form ───────────────
-function SpouseLanguageTestForm({ profile }) {
+function SpouseLanguageTestForm({ profile, syncStatus }) {
   const qc = useQueryClient()
   const [adding, setAdding] = useState(false)
 
@@ -210,15 +421,44 @@ function SpouseLanguageTestForm({ profile }) {
         <div className="space-y-2">
           <div className="grid grid-cols-4 gap-2 text-center">
             {['reading', 'writing', 'speaking', 'listening'].map(skill => (
-              <div key={skill} className="p-2 rounded-lg bg-slate-900">
+              <div key={skill} className={`p-2 rounded-lg ${syncStatus?.spouse_conflicts?.[`spouse_lang_${skill}`] ? 'bg-amber-950/30 border border-amber-700/30' : 'bg-slate-900'}`}>
                 <p className="text-xs text-slate-500 capitalize">{skill}</p>
-                <p className="font-bold text-white">{existingTest[skill]}</p>
+                <p className={`font-bold ${syncStatus?.spouse_conflicts?.[`spouse_lang_${skill}`] ? 'text-amber-400' : 'text-white'}`}>
+                  {existingTest[skill]}
+                  {syncStatus?.spouse_conflicts?.[`spouse_lang_${skill}`] && ' ⚠️'}
+                </p>
                 <p className="text-xs text-emerald-400">CLB {existingTest.clb?.[skill]}</p>
               </div>
             ))}
           </div>
+          {/* Spouse conflict badges */}
+          {syncStatus && (
+            <div className="space-y-1">
+              {['reading', 'writing', 'speaking', 'listening'].map(skill => (
+                <FieldConflict key={skill} fieldKey={`spouse_lang_${skill}`} syncStatus={{
+                  conflicts: syncStatus.spouse_conflicts || {}
+                }} />
+              ))}
+              <FieldConflict fieldKey="spouse_lang_test_date" syncStatus={{
+                conflicts: syncStatus.spouse_conflicts || {}
+              }} />
+            </div>
+          )}
           <div className="flex gap-2">
-            <button type="button" onClick={() => setAdding(true)} className="btn-secondary text-xs px-3">Update</button>
+            <button type="button" onClick={() => {
+              // Pre-populate form with existing values before opening
+              if (existingTest) {
+                reset({
+                  test_type: existingTest.test_type || 'ielts',
+                  reading:   existingTest.reading   || '',
+                  writing:   existingTest.writing   || '',
+                  speaking:  existingTest.speaking  || '',
+                  listening: existingTest.listening || '',
+                  test_date: existingTest.test_date || '',
+                })
+              }
+              setAdding(true)
+            }} className="btn-secondary text-xs px-3">Update</button>
             <button type="button" onClick={() => deleteTest.mutate()} className="btn-ghost text-xs px-3 text-red-400 hover:text-red-300">
               <Trash2 size={12} /> Remove
             </button>
@@ -271,7 +511,7 @@ function SpouseLanguageTestForm({ profile }) {
 }
 
 // ─── Spouse Profile Section ─────────────────
-function SpouseSection({ profile }) {
+function SpouseSection({ profile, syncStatus }) {
   const qc = useQueryClient()
   const { register, handleSubmit, watch, setValue, formState: { isSubmitting } } = useForm({
     defaultValues: {
@@ -312,6 +552,7 @@ function SpouseSection({ profile }) {
   }
 
   return (
+    <>
     <form onSubmit={handleSubmit(data => saveSpouse.mutate(data))} className="space-y-5">
       <div className="p-4 rounded-xl bg-slate-800/50 border border-slate-700 space-y-4">
         <h3 className="font-semibold text-white flex items-center gap-2">👫 Spouse / Common-Law Partner</h3>
@@ -385,16 +626,17 @@ function SpouseSection({ profile }) {
         </div>
       </div>
 
-      {/* Spouse Language Test */}
-      <SpouseLanguageTestForm profile={profile} />
-
       <button type="submit" disabled={isSubmitting} className="btn-primary">
         {isSubmitting ? <Loader2 size={16} className="animate-spin" /> : 'Save Spouse Information'}
       </button>
     </form>
+
+    {/* Spouse Language Test — outside the form to prevent nested form HTML issue */}
+    <SpouseLanguageTestForm profile={profile} syncStatus={syncStatus} />
+    </>
   )
 }
-function LanguageForm({ profile, onNext }) {
+function LanguageForm({ profile, syncStatus, onNext }) {
   const [adding, setAdding] = useState(false)
   const [editingId, setEditingId] = useState(null)
   const { register, handleSubmit, reset, setValue, formState: { isSubmitting } } = useForm()
@@ -489,12 +731,26 @@ function LanguageForm({ profile, onNext }) {
                     {['listening', 'reading', 'writing', 'speaking'].map(skill => (
                       <div key={skill}>
                         <p className="text-xs text-slate-500 capitalize">{skill}</p>
-                        <p className="text-lg font-bold text-white">{test[skill]}</p>
+                        <p className={`text-lg font-bold ${syncStatus?.conflicts?.[`lang_${skill}`] ? 'text-red-400' : 'text-white'}`}>
+                          {test[skill]}
+                          {syncStatus?.conflicts?.[`lang_${skill}`] && (
+                            <span className="ml-1 text-xs">⚠️</span>
+                          )}
+                        </p>
                         {test[`clb_${skill}`] && <p className="text-xs text-maple-400">CLB {test[`clb_${skill}`]}</p>}
                       </div>
                     ))}
                   </div>
                   <p className="text-xs text-slate-500 mt-2">Test date: {test.test_date}</p>
+                  {/* Conflict badges — shown when document contradicts profile */}
+                  {test.role === 'first' && syncStatus && (
+                    <div className="mt-2 space-y-1">
+                      {['listening', 'reading', 'writing', 'speaking'].map(skill => (
+                        <FieldConflict key={skill} fieldKey={`lang_${skill}`} syncStatus={syncStatus} />
+                      ))}
+                      <FieldConflict fieldKey="lang_test_date" syncStatus={syncStatus} />
+                    </div>
+                  )}
                 </div>
                 <div className="flex gap-1">
                   <button onClick={() => startEdit(test)} className="btn-ghost text-xs px-2 py-1.5 text-blue-400 hover:text-blue-300">
@@ -587,22 +843,29 @@ function LanguageTestFields({ register }) {
 }
 
 // ─── Work Experience Form ────────────────────
-function WorkForm({ profile, onNext }) {
+function WorkForm({ profile, syncStatus, onNext }) {
   const [adding, setAdding] = useState(false)
   const [editingId, setEditingId] = useState(null)
   const [nocQuery, setNocQuery] = useState('')
   const [nocResults, setNocResults] = useState([])
   const [nocSearching, setNocSearching] = useState(false)
+  const nocQueryRef = React.useRef('')
   const { register, handleSubmit, reset, setValue, formState: { isSubmitting } } = useForm({ defaultValues: { hours_per_week: 40, is_current: false } })
   const qc = useQueryClient()
 
   const searchNoc = async () => {
-    if (!nocQuery.trim()) return
+    const q = nocQueryRef.current.trim()
+    if (!q) { toast.error('Enter a job title first'); return }
     setNocSearching(true)
     try {
-      const res = await aiAPI.findNoc({ job_title: nocQuery, country: profile?.nationality || '' })
-      setNocResults(res.data?.suggestions || [])
-    } catch { toast.error('NOC search failed') }
+      const res = await aiAPI.findNoc({ job_title: q, country: profile?.nationality || '' })
+      const suggestions = res.data?.suggestions || []
+      if (suggestions.length === 0) toast.error('No NOC matches found — try a different title')
+      setNocResults(suggestions)
+    } catch (err) {
+      toast.error('NOC search failed — check FastAPI is running')
+      console.error('NOC search error:', err?.response?.data || err)
+    }
     finally { setNocSearching(false) }
   }
 
@@ -646,14 +909,16 @@ function WorkForm({ profile, onNext }) {
   const experiences = profile?.work_experiences || []
   const isFormOpen = adding || !!editingId
 
-  const WorkFields = () => (
+  // NOC search fields — rendered inline (not as nested component) to prevent focus loss on re-render
+  const workFieldsJSX = (
     <div className="space-y-4">
       {/* NOC Finder */}
       <div className="p-3 rounded-xl bg-slate-900/80 border border-slate-700 space-y-2">
         <p className="text-xs font-semibold text-slate-400">🔍 Find NOC Code</p>
         <div className="flex gap-2">
           <input className="input flex-1 text-sm" placeholder="e.g. Software Developer, Registered Nurse..."
-            value={nocQuery} onChange={e => setNocQuery(e.target.value)}
+            value={nocQuery}
+            onChange={e => { setNocQuery(e.target.value); nocQueryRef.current = e.target.value }}
             onKeyDown={e => e.key === 'Enter' && (e.preventDefault(), searchNoc())} />
           <button type="button" onClick={searchNoc} disabled={nocSearching} className="btn-secondary text-sm px-4">
             {nocSearching ? <Loader2 size={14} className="animate-spin" /> : 'Search'}
@@ -714,6 +979,8 @@ function WorkForm({ profile, onNext }) {
         )}
       </div>
 
+      {syncStatus && <FieldConflict fieldKey="work_experience_count" syncStatus={syncStatus} />}
+
       {experiences.map(exp => (
         <div key={exp.id}>
           {editingId === exp.id ? (
@@ -722,7 +989,7 @@ function WorkForm({ profile, onNext }) {
               className="p-4 rounded-xl border border-blue-500/40 bg-blue-500/5 space-y-4"
             >
               <h3 className="font-semibold text-white text-sm">✏️ Editing: {exp.job_title} @ {exp.employer_name}</h3>
-              <WorkFields />
+              {workFieldsJSX}
               <div className="flex gap-3">
                 <button type="submit" disabled={updateWork.isLoading} className="btn-primary text-sm">
                   {updateWork.isLoading ? <Loader2 size={16} className="animate-spin" /> : 'Save Changes'}
@@ -767,7 +1034,7 @@ function WorkForm({ profile, onNext }) {
             className="p-4 rounded-xl border border-maple-500/30 bg-maple-500/5 space-y-4 overflow-hidden"
           >
             <h3 className="font-semibold text-white">Add Work Experience</h3>
-            <WorkFields />
+            {workFieldsJSX}
             <div className="flex gap-3">
               <button type="submit" disabled={addWork.isLoading} className="btn-primary text-sm">
                 {addWork.isLoading ? <Loader2 size={16} className="animate-spin" /> : 'Add Experience'}
@@ -791,7 +1058,7 @@ function WorkForm({ profile, onNext }) {
 }
 
 // ─── Education Form ──────────────────────────
-function EducationForm({ profile, onNext }) {
+function EducationForm({ profile, syncStatus, onNext }) {
   const { register, handleSubmit, formState: { isSubmitting } } = useForm({
     defaultValues: {
       level: profile?.education?.level || 'bachelors',
@@ -959,7 +1226,7 @@ function OtherForm({ profile }) {
 }
 
 // ─── Spouse Step Wrapper ─────────────────────
-function SpouseStep({ profile, onNext }) {
+function SpouseStep({ profile, syncStatus, onNext }) {
   const hasSpouse = profile?.has_spouse
   return (
     <div className="space-y-6">
@@ -978,7 +1245,7 @@ function SpouseStep({ profile, onNext }) {
         </div>
       ) : (
         <>
-          <SpouseSection profile={profile} />
+          <SpouseSection profile={profile} syncStatus={syncStatus} />
           <div className="pt-2">
             <button onClick={onNext} className="btn-primary">
               Continue to Other Info <ChevronRight size={16} />
@@ -994,6 +1261,7 @@ function SpouseStep({ profile, onNext }) {
 export default function Profile() {
   const [step, setStep] = useState('personal')
   const { data: profile, isLoading } = useProfile()
+  const { data: syncStatus } = useSyncStatus()
 
   const STEPS = getSteps(profile)
   const hasSpouse = STEPS.some(s => s.id === 'spouse')
@@ -1025,6 +1293,8 @@ export default function Profile() {
         <p className="text-slate-400 text-sm mt-1">Build your Express Entry profile to calculate your CRS score</p>
       </div>
 
+      <SyncStatusBanner syncStatus={syncStatus} />
+
       <StepIndicator current={step} steps={STEPS} />
 
       <div className="card">
@@ -1036,11 +1306,11 @@ export default function Profile() {
             exit={{ opacity: 0, x: -20 }}
             transition={{ duration: 0.3 }}
           >
-            {step === 'personal'  && <PersonalForm  profile={profile} onNext={() => setStep(nextStep('personal'))} />}
-            {step === 'language'  && <LanguageForm  profile={profile} onNext={() => setStep(nextStep('language'))} />}
-            {step === 'work'      && <WorkForm      profile={profile} onNext={() => setStep(nextStep('work'))} />}
-            {step === 'education' && <EducationForm profile={profile} onNext={() => setStep(nextStep('education'))} />}
-            {step === 'spouse'    && hasSpouse && <SpouseStep profile={profile} onNext={() => setStep(nextStep('spouse'))} />}
+            {step === 'personal'  && <PersonalForm  profile={profile} syncStatus={syncStatus} onNext={() => setStep(nextStep('personal'))} />}
+            {step === 'language'  && <LanguageForm  profile={profile} syncStatus={syncStatus} onNext={() => setStep(nextStep('language'))} />}
+            {step === 'work'      && <WorkForm      profile={profile} syncStatus={syncStatus} onNext={() => setStep(nextStep('work'))} />}
+            {step === 'education' && <EducationForm profile={profile} syncStatus={syncStatus} onNext={() => setStep(nextStep('education'))} />}
+            {step === 'spouse'    && hasSpouse && <SpouseStep profile={profile} syncStatus={syncStatus} onNext={() => setStep(nextStep('spouse'))} />}
             {step === 'other'     && <OtherForm     profile={profile} />}
           </motion.div>
         </AnimatePresence>

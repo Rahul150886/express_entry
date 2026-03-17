@@ -216,11 +216,50 @@ class DocumentIntelligenceService:
             r"^([A-Z][A-Z\s\-']{5,40})$",  # All-caps name line
         ])
 
-        # Test date
-        test_date = find([
-            r"(?:Test\s+Date|Date\s+of\s+Test|Examination\s+Date)[:\s]+(\d{1,2}[\s\-/\.][A-Za-z]+[\s\-/\.]\d{2,4}|\d{4}-\d{2}-\d{2}|\d{1,2}/\d{1,2}/\d{2,4})",
-            r"(?:Test\s+Date|Date)[:\s]+(\d{1,2}\s+\w+\s+\d{4})",
+        # Test date — IELTS TRF uses many formats: "15 Feb 2024", "2024-02-15", "15/02/2024"
+        test_date_raw = find([
+            r"(?:Test\s+Date|Date\s+of\s+Test|Examination\s+Date|Date\s+Taken)[:\s]+(\d{1,2}[\s\-/\.](?:[A-Za-z]+|\d{1,2})[\s\-/\.]\d{2,4})",
+            r"(?:Test\s+Date|Date\s+of\s+Test|Examination\s+Date|Date)[:\s]+(\d{4}[-/]\d{2}[-/]\d{2})",
+            r"(?:Test\s+Date|Date)[:\s]+(\d{1,2}\s+[A-Za-z]+\s+\d{4})",
+            r"(?:Test\s+Date|Date)[:\s]+([A-Za-z]+\s+\d{1,2},?\s+\d{4})",
+            r"(\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{4})",
         ])
+
+        # If regex still empty, scan all dates in raw text and pick the most plausible one
+        # (IELTS TRFs have few dates — usually DOB and test date; pick the most recent)
+        if not test_date_raw:
+            import re as _re2
+            all_dates = _re2.findall(
+                r'\b(\d{1,2}[\s/\-](?:\d{1,2}|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*)[\s/\-]\d{4})\b',
+                raw, _re2.IGNORECASE
+            )
+            if all_dates:
+                # Try to parse each, pick most recent that is not a future date
+                import dateparser as _dp0
+                from datetime import date as _d0
+                candidates = []
+                for d in all_dates:
+                    try:
+                        parsed = _dp0.parse(d, settings={"RETURN_AS_TIMEZONE_AWARE": False})
+                        if parsed and parsed.date() <= _d0.today():
+                            candidates.append(parsed.date())
+                    except Exception:
+                        pass
+                if candidates:
+                    test_date_raw = max(candidates).isoformat()
+
+        # Normalise to ISO format
+        test_date = ""
+        if test_date_raw:
+            try:
+                import dateparser as _dp
+                if isinstance(test_date_raw, str):
+                    parsed_dt = _dp.parse(test_date_raw, settings={"RETURN_AS_TIMEZONE_AWARE": False})
+                    test_date = parsed_dt.date().isoformat() if parsed_dt else test_date_raw
+                else:
+                    test_date = str(test_date_raw)  # already a date object isoformat
+            except Exception:
+                test_date = str(test_date_raw)
 
         # Band scores — IELTS uses 0.0-9.0 scale
         # Pattern: "Listening 7.5" or "L 8.0" or score in a table
@@ -260,7 +299,15 @@ class DocumentIntelligenceService:
                     kvp[pair.key.content.lower().strip()] = pair.value.content.strip()
             if not test_type:   test_type       = kvp.get("test type", "")
             if not candidate_name: candidate_name = kvp.get("candidate name", kvp.get("name", ""))
-            if not test_date:   test_date       = kvp.get("test date", kvp.get("date of test", ""))
+            if not test_date:
+                raw_date = kvp.get("test date", kvp.get("date of test", kvp.get("date", "")))
+                if raw_date:
+                    try:
+                        import dateparser as _dp2
+                        parsed_dt2 = _dp2.parse(raw_date, settings={"RETURN_AS_TIMEZONE_AWARE": False})
+                        test_date = parsed_dt2.date().isoformat() if parsed_dt2 else raw_date
+                    except Exception:
+                        test_date = raw_date
             if not listening:   listening       = kvp.get("listening", "")
             if not reading:     reading         = kvp.get("reading", "")
             if not writing:     writing         = kvp.get("writing", "")
@@ -669,14 +716,28 @@ class DocumentReviewService:
                     profile_date_str = str(primary_test.test_date)
                     profile_date = dateparser.parse(profile_date_str).date()
                     if doc_test_date != profile_date:
-                        hard_issues.append(
+                        date_msg = (
                             f"Test date mismatch — document shows {doc_test_date.strftime('%B %d, %Y')}, "
                             f"profile says {profile_date.strftime('%B %d, %Y')}. "
                             f"Update your profile to match the actual test date."
                         )
+                        hard_issues.append(date_msg)
+                        # Add to profile_mismatches directly so Documents page shows it
+                        hard_date_mismatch = {
+                            "field": "Test Date",
+                            "profile_value": profile_date.strftime("%Y-%m-%d"),
+                            "document_value": doc_test_date.strftime("%Y-%m-%d"),
+                            "severity": "critical",
+                            "note": date_msg
+                        }
                         logger.info(f"review_document: test date mismatch doc={doc_test_date} profile={profile_date}")
+                    else:
+                        hard_date_mismatch = None
                 except Exception as e:
                     logger.warning(f"review_document: could not compare test dates: {e}")
+                    hard_date_mismatch = None
+            else:
+                hard_date_mismatch = None
 
         # If we already have critical hard issues, include them in the prompt context
         hard_context = ""
@@ -916,6 +977,13 @@ Be conservative: passing a good document is better than generating false issues.
             if "profile_mismatches" not in result:
                 result["profile_mismatches"] = []
 
+            # ── Inject hard date mismatch into profile_mismatches ────────────
+            if hard_date_mismatch:
+                # Only add if GPT didn't already catch it
+                existing_fields = [m.get("field","").lower() for m in result["profile_mismatches"]]
+                if "test date" not in existing_fields:
+                    result["profile_mismatches"].insert(0, hard_date_mismatch)
+
             # ── Filter false mismatches caused by format/wording differences ─
             result["profile_mismatches"] = _filter_mismatches(result["profile_mismatches"])
 
@@ -988,25 +1056,23 @@ class NocFinderService:
 
 Job Title: {job_title}
 Country: {country}
-Job Duties:
-{job_duties}
+Job Duties: {job_duties or 'Not provided'}
 
 Return top 3 NOC matches. Prioritize TEER 0, 1, 2 for Express Entry eligibility.
 
-Return JSON array:
-[
-  {{
-    "noc_code": "12345",
-    "noc_title": "Official NOC title",
-    "teer_level": 1,
-    "match_confidence": 0.95,
-    "explanation": "Why this NOC fits",
-    "eligible_for_express_entry": true,
-    "eligible_program": "FSW/CEC/FST or N/A",
-    "key_duties_matched": ["duty1", "duty2"],
-    "typical_clb_required": 7
-  }}
-]"""
+Return a JSON object with a "suggestions" key containing an array:
+{{
+  "suggestions": [
+    {{
+      "noc_code": "21311",
+      "title": "Software Engineer",
+      "teer": 1,
+      "match_confidence": 0.95,
+      "explanation": "Why this NOC fits",
+      "eligible_for_express_entry": true
+    }}
+  ]
+}}"""
 
         response = await self._get_client().chat.completions.create(
             model=settings.AZURE_OPENAI_DEPLOYMENT,
@@ -1021,12 +1087,33 @@ Return JSON array:
         try:
             content = response.choices[0].message.content
             parsed = json.loads(content)
-            # Handle both array response and object with array
-            result = parsed if isinstance(parsed, list) else parsed.get("matches", parsed.get("noc_codes", []))
-            logger.info(f"NocFinder.find_noc_codes: done in {(time.perf_counter()-t0)*1000:.0f}ms  matches={len(result)}")
-            return result
+            # Handle all possible key names GPT might use
+            if isinstance(parsed, list):
+                result = parsed
+            else:
+                result = (
+                    parsed.get("suggestions") or
+                    parsed.get("matches") or
+                    parsed.get("noc_codes") or
+                    parsed.get("results") or
+                    parsed.get("noc_matches") or
+                    []
+                )
+            # Normalise field names — frontend expects: noc_code, title, teer
+            normalised = []
+            for r in result:
+                normalised.append({
+                    "noc_code":  str(r.get("noc_code") or r.get("code") or ""),
+                    "title":     r.get("title") or r.get("noc_title") or r.get("job_title") or "",
+                    "teer":      int(r.get("teer") or r.get("teer_level") or 0),
+                    "match_confidence": float(r.get("match_confidence") or 0.8),
+                    "explanation": r.get("explanation") or "",
+                    "eligible_for_express_entry": bool(r.get("eligible_for_express_entry", True)),
+                })
+            logger.info(f"NocFinder.find_noc_codes: done in {(time.perf_counter()-t0)*1000:.0f}ms  matches={len(normalised)}")
+            return normalised
         except (json.JSONDecodeError, KeyError) as e:
-            logger.error(f"NocFinder.find_noc_codes: parse error after {(time.perf_counter()-t0)*1000:.0f}ms: {e}  raw={response.choices[0].message.content[:200]!r}")
+            logger.error(f"NocFinder.find_noc_codes: parse error: {e}  raw={response.choices[0].message.content[:300]!r}")
             return []
 
 
@@ -2951,16 +3038,40 @@ class EligibilityCheckerService:
         # Official IRCC FSW 67-point selection grid
         # https://www.canada.ca/en/immigration-refugees-citizenship/services/immigrate-canada/express-entry/eligibility/federal-skilled-workers/six-selection-factors-federal-skilled-workers.html
 
-        def _fsw_language_points(clb_score: int) -> int:
-            """First language points (max 28). CLB 9+ = 6pts/ability, CLB 8 = 5, CLB 7 = 4"""
-            if clb_score >= 9:   pts_per = 6
-            elif clb_score >= 8: pts_per = 5
-            elif clb_score >= 7: pts_per = 4
-            else:                pts_per = 0
-            return pts_per * 4  # 4 abilities
+        def _fsw_language_points(profile: dict) -> tuple[int, str]:
+            """
+            Language points (max 28):
+            - First official language: max 24 pts (6 pts each skill at CLB 9+, 5 at CLB 8, 4 at CLB 7)
+            - Second official language: max 4 pts (4 if all 4 skills >= CLB 5, else 0)
+            IRCC scores each skill separately — not an average.
+            """
+            def skill_pts(clb: int) -> int:
+                if clb >= 9: return 6
+                if clb >= 8: return 5
+                if clb >= 7: return 4
+                return 0  # Below CLB 7 = not eligible for FSW
+
+            # First language — per skill
+            l1 = skill_pts(profile.get("clb_listening", 0))
+            l2 = skill_pts(profile.get("clb_reading", 0))
+            l3 = skill_pts(profile.get("clb_writing", 0))
+            l4 = skill_pts(profile.get("clb_speaking", 0))
+            first_lang_pts = l1 + l2 + l3 + l4  # max 24
+
+            # Second language — all 4 skills must be CLB 5+
+            s_skills = [
+                profile.get("clb2_listening", 0), profile.get("clb2_reading", 0),
+                profile.get("clb2_writing", 0), profile.get("clb2_speaking", 0)
+            ]
+            second_lang_pts = 4 if all(s >= 5 for s in s_skills) and any(s > 0 for s in s_skills) else 0
+
+            total = first_lang_pts + second_lang_pts
+            detail = f"1st lang: L{l1}+R{l2}+W{l3}+S{l4}={first_lang_pts}pts"
+            if second_lang_pts: detail += f", 2nd lang: +{second_lang_pts}pts"
+            return total, detail
 
         def _fsw_education_points(edu: str) -> int:
-            """Education points (max 25)"""
+            """Education points (max 25) — IRCC official table"""
             return {
                 "doctoral":                   25,
                 "masters":                    23,
@@ -2973,18 +3084,20 @@ class EligibilityCheckerService:
                 "":                           0,
             }.get(edu, 15)
 
-        def _fsw_experience_points(yrs: float) -> int:
-            """Foreign work experience points (max 15)"""
-            if yrs >= 6:   return 15
-            elif yrs >= 5: return 13
-            elif yrs >= 4: return 11
-            elif yrs >= 3: return 9
-            elif yrs >= 2: return 7
-            elif yrs >= 1: return 5
+        def _fsw_experience_points(total_yrs: float) -> int:
+            """
+            Work experience points (max 15) — IRCC official table.
+            Counts both Canadian AND foreign skilled work experience.
+            1 yr=9, 2-3 yrs=11, 4-5 yrs=13, 6+ yrs=15
+            """
+            if total_yrs >= 6:   return 15
+            elif total_yrs >= 4: return 13
+            elif total_yrs >= 2: return 11
+            elif total_yrs >= 1: return 9
             return 0
 
         def _fsw_age_points(a: int) -> int:
-            """Age points (max 12). Peak 18-35 = 12pts"""
+            """Age points (max 12) — IRCC official table"""
             if 18 <= a <= 35: return 12
             elif a == 36:     return 11
             elif a == 37:     return 10
@@ -3003,22 +3116,40 @@ class EligibilityCheckerService:
             """Arranged employment points (max 10)"""
             return 10 if has_offer else 0
 
-        def _fsw_adaptability_points(cdn_work_yrs: float, has_offer: bool, edu: str) -> int:
-            """Adaptability points (max 10) — Canadian work exp, job offer, education"""
+        def _fsw_adaptability_points(profile: dict) -> tuple[int, list]:
+            """
+            Adaptability points (max 10) — IRCC official table.
+            Multiple factors, capped at 10.
+            """
             pts = 0
-            if cdn_work_yrs >= 1:  pts += 5   # Canadian work experience
-            if has_offer:          pts += 5   # Job offer
-            # Canadian education (simplified — if is_canadian in profile)
-            return min(pts, 10)
+            earned = []
+            cdn_work = profile.get("canadian_work_years", 0)
+            has_offer = profile.get("has_job_offer", False)
+            has_sibling = profile.get("has_sibling_in_canada", False)
+            cdn_edu = profile.get("is_canadian_education", False)
 
-        # Calculate all 6 factors
-        lang_pts   = _fsw_language_points(clb)
-        edu_pts    = _fsw_education_points(education)
-        exp_pts    = _fsw_experience_points(foreign_work)
-        age_pts    = _fsw_age_points(age)
-        job_pts    = _fsw_job_offer_points(has_job_offer)
-        adapt_pts  = _fsw_adaptability_points(cdn_work, has_job_offer, education)
-        total_fsw  = lang_pts + edu_pts + exp_pts + age_pts + job_pts + adapt_pts
+            if cdn_work >= 1:
+                pts += 10; earned.append(f"Canadian work 1+ yr (+10)")
+            if has_offer and cdn_work < 1:
+                pts += 5; earned.append("Job offer arranged employment (+5)")
+            if has_sibling:
+                pts += 5; earned.append("Relative in Canada (+5)")
+            if cdn_edu:
+                pts += 5; earned.append("Studied in Canada (+5)")
+
+            total = min(pts, 10)
+            return total, earned
+
+        # Calculate all 6 factors using official IRCC tables
+        # Use total work (Canadian + foreign) for work experience points per IRCC rules
+        total_work_yrs = profile.get("total_work_years", foreign_work + cdn_work)
+        lang_pts, lang_detail  = _fsw_language_points(profile)
+        edu_pts                = _fsw_education_points(education)
+        exp_pts                = _fsw_experience_points(total_work_yrs)
+        age_pts                = _fsw_age_points(age)
+        job_pts                = _fsw_job_offer_points(has_job_offer)
+        adapt_pts, adapt_items = _fsw_adaptability_points(profile)
+        total_fsw              = lang_pts + edu_pts + exp_pts + age_pts + job_pts + adapt_pts
 
         fsw_checks = []
         fsw_pass = True
@@ -3053,12 +3184,12 @@ class EligibilityCheckerService:
             "your_value": f"{total_fsw}/100 points",
             "required": "67 points minimum",
             "breakdown": {
-                "Language (max 28)":         f"{lang_pts} pts  (CLB {clb})",
+                "Language (max 28)":         f"{lang_pts} pts  ({lang_detail})",
                 "Education (max 25)":        f"{edu_pts} pts  ({education.replace('_',' ').title() if education else 'Not set'})",
-                "Work Experience (max 15)":  f"{exp_pts} pts  ({foreign_work:.1f} yrs foreign)",
+                "Work Experience (max 15)":  f"{exp_pts} pts  ({total_work_yrs:.1f} yrs total)",
                 "Age (max 12)":              f"{age_pts} pts  (age {age})",
                 "Job Offer (max 10)":        f"{job_pts} pts  ({'Yes' if has_job_offer else 'No'})",
-                "Adaptability (max 10)":     f"{adapt_pts} pts  ({'CDN work' if cdn_work >= 1 else 'No CDN work'})",
+                "Adaptability (max 10)":     f"{adapt_pts} pts  ({', '.join(adapt_items) if adapt_items else 'None'})",
                 "TOTAL":                     f"{total_fsw}/100",
             },
             "fix": None if pts_ok else self._fsw_gap_advice(total_fsw, lang_pts, edu_pts, exp_pts, age_pts, job_pts, adapt_pts, clb, education, foreign_work, age)

@@ -17,6 +17,7 @@ from celery import Celery
 from celery.schedules import crontab
 from loguru import logger
 from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 
 from infrastructure.config import get_settings
 
@@ -160,7 +161,17 @@ async def _analyze_document_async(document_id: str, document_type: str, blob_url
             extraction = await di_service.analyze_document(doc_type_enum, file_bytes, mime_type)
 
             reviewer = DocumentReviewService()
-            applicant_result = await db.execute(select(ApplicantDB).where(ApplicantDB.id == doc.applicant_id))
+            applicant_result = await db.execute(
+                select(ApplicantDB)
+                .options(
+                    selectinload(ApplicantDB.language_tests),
+                    selectinload(ApplicantDB.work_experiences),
+                    selectinload(ApplicantDB.education),
+                    selectinload(ApplicantDB.job_offer),
+                    selectinload(ApplicantDB.spouse_language_test),
+                )
+                .where(ApplicantDB.id == doc.applicant_id)
+            )
             applicant_db = applicant_result.scalar_one_or_none()
 
             # Build a minimal Applicant-like object the reviewer can use
@@ -260,7 +271,58 @@ async def _analyze_document_async(document_id: str, document_type: str, blob_url
                 job_offer=job_offer,
                 eligible_programs=[],
             )
-            review = await reviewer.review_document(doc_type_enum, file_bytes, mime_type, applicant_domain, extracted_fields=extraction.extracted_fields)
+            # ── For spouse documents, build a spouse-aware domain for the reviewer ──
+            is_spouse_doc = (doc.person_label or "applicant") == "spouse"
+            if is_spouse_doc:
+                # Build a minimal domain object using spouse profile fields
+                # so the reviewer compares against spouse data, not applicant data
+                from core.domain.models import LanguageTest as LT2, LanguageTestType as LTT2, LanguageRole as LR2, ClbScores as CLB2
+                spouse_lang_tests = []
+                if applicant_db.spouse_language_test:
+                    slt = applicant_db.spouse_language_test
+                    try:
+                        st = LT2(
+                            test_type=LTT2(slt.test_type.lower() if slt.test_type else 'ielts'),
+                            role=LR2('first'),
+                            language='english',
+                            listening=slt.listening or 0,
+                            reading=slt.reading or 0,
+                            writing=slt.writing or 0,
+                            speaking=slt.speaking or 0,
+                            test_date=slt.test_date,
+                            clb_equivalent=CLB2(
+                                listening=slt.clb_listening or 0,
+                                reading=slt.clb_reading or 0,
+                                writing=slt.clb_writing or 0,
+                                speaking=slt.clb_speaking or 0,
+                            )
+                        )
+                        spouse_lang_tests.append(st)
+                    except Exception as se:
+                        logger.warning(f"spouse language test build error: {se}")
+
+                review_domain = ApplicantDomain(
+                    id=applicant_db.id,
+                    user_id=applicant_db.user_id,
+                    full_name=applicant_db.spouse_name or "Spouse",
+                    date_of_birth=applicant_db.spouse_dob or _date(1990, 1, 1),
+                    nationality=applicant_db.spouse_nationality or applicant_db.nationality or "",
+                    country_of_residence=applicant_db.country_of_residence or "",
+                    marital_status=MaritalStatus(applicant_db.marital_status) if applicant_db.marital_status else MaritalStatus.MARRIED,
+                    has_spouse=False,
+                    has_provincial_nomination=False,
+                    has_sibling_in_canada=False,
+                    language_tests=spouse_lang_tests,
+                    work_experiences=[],
+                    education=None,
+                    job_offer=None,
+                    eligible_programs=[],
+                )
+                logger.info(f"_analyze_document_async: spouse doc — reviewing against spouse profile  name={review_domain.full_name}")
+            else:
+                review_domain = applicant_domain
+
+            review = await reviewer.review_document(doc_type_enum, file_bytes, mime_type, review_domain, extracted_fields=extraction.extracted_fields)
 
             doc.ai_extracted_fields = extraction.extracted_fields
             doc.ai_confidence = extraction.confidence
@@ -273,6 +335,34 @@ async def _analyze_document_async(document_id: str, document_type: str, blob_url
             existing_fields["_must_fix"] = review.get("must_fix", [])
             doc.ai_extracted_fields = existing_fields
             doc.status = "ai_reviewed"
+
+            # ── Profile sync: only run for applicant docs, not spouse docs ──────
+            # Spouse docs should not update the applicant's profile_verification
+            emp_doc_count = 0
+            if not is_spouse_doc and doc_type_enum.value == "employment_letter":
+                emp_result = await db.execute(
+                    select(ApplicationDocumentDB).where(
+                        ApplicationDocumentDB.applicant_id == applicant_db.id,
+                        ApplicationDocumentDB.document_type == "employment_letter",
+                        ApplicationDocumentDB.status == "ai_reviewed",
+                        ApplicationDocumentDB.person_label == "applicant",
+                    )
+                )
+                emp_doc_count = len(emp_result.scalars().all())
+
+            # Only sync profile verification for applicant documents
+            if not is_spouse_doc:
+                await _sync_profile_verification(
+                    db, applicant_db, doc_type_enum.value,
+                    extraction.extracted_fields, str(doc.id),
+                    emp_doc_count=emp_doc_count
+                )
+            else:
+                # For spouse language test doc — sync spouse language scores
+                await _sync_spouse_verification(
+                    db, applicant_db, doc_type_enum.value,
+                    extraction.extracted_fields, str(doc.id)
+                )
 
             if extraction.confidence > 0.85:
                 await _auto_apply_extraction(db, applicant_db, doc_type_enum, extraction.extracted_fields)
@@ -300,6 +390,261 @@ async def _analyze_document_async(document_id: str, document_type: str, blob_url
             doc.status = "pending"
             await db.commit()
             raise e
+
+
+async def _sync_profile_verification(db, applicant_db, doc_type: str, extracted_fields: dict, doc_id: str, emp_doc_count: int = 0):
+    """
+    After document review, compare extracted fields against profile and update
+    profile_verification JSON — the single source of truth for field sync state.
+
+    Verification states:
+      verified   — profile and document agree
+      conflict   — profile and document contradict (user must resolve)
+      unverified — profile has value but no document
+      missing    — no value in profile
+    """
+    from sqlalchemy.orm.attributes import flag_modified
+    from datetime import date as _date, datetime as _datetime
+
+    current = dict(applicant_db.profile_verification or {})
+
+    def v(status, profile_val, doc_val=None, message=None):
+        return {
+            "status": status,
+            "profile_value": str(profile_val) if profile_val is not None else "",
+            "doc_value": str(doc_val) if doc_val is not None else "",
+            "doc_id": doc_id,
+            "message": message or "",
+            "acknowledged": current.get(status, {}).get("acknowledged", False),
+            "updated_at": _datetime.utcnow().isoformat(),
+        }
+
+    def get_f(key):
+        val = extracted_fields.get(key)
+        return str(val).strip() if val else None
+
+    # ── PASSPORT ────────────────────────────────────────────────
+    if doc_type == "passport":
+        d_num    = get_f("document_number")
+        d_expiry = get_f("date_of_expiry")
+        d_issue  = get_f("date_of_issue")
+        d_coi    = get_f("country_of_issue") or get_f("nationality")
+        d_city   = get_f("place_of_birth")
+        d_name   = get_f("first_name")
+
+        p_num    = applicant_db.passport_number or ""
+        p_expiry = applicant_db.passport_expiry_date.isoformat() if applicant_db.passport_expiry_date else ""
+        p_name   = (applicant_db.full_name or "").split()[0] if applicant_db.full_name else ""
+
+        # Auto-populate passport fields directly from document (no conflict — these come FROM the doc)
+        if d_num and not p_num:
+            applicant_db.passport_number = d_num
+        if d_coi and not applicant_db.passport_country_of_issue:
+            applicant_db.passport_country_of_issue = d_coi
+        if d_city and not applicant_db.city_of_birth:
+            applicant_db.city_of_birth = d_city
+        if d_expiry and not applicant_db.passport_expiry_date:
+            try:
+                from dateutil import parser as dp
+                applicant_db.passport_expiry_date = dp.parse(d_expiry).date()
+            except Exception: pass
+        if d_issue and not applicant_db.passport_issue_date:
+            try:
+                from dateutil import parser as dp
+                applicant_db.passport_issue_date = dp.parse(d_issue).date()
+            except Exception: pass
+
+        # Passport number
+        if d_num and p_num:
+            match = d_num.replace(" ", "").upper() == p_num.replace(" ", "").upper()
+            current["passport_number"] = v(
+                "verified" if match else "conflict", p_num, d_num,
+                None if match else f"Profile has '{p_num}' but passport shows '{d_num}'"
+            )
+        elif d_num:
+            current["passport_number"] = v("verified", d_num, d_num, "Extracted from passport — update profile")
+        elif p_num:
+            current["passport_number"] = v("unverified", p_num, None, "No passport uploaded to verify")
+
+        # Expiry date
+        if d_expiry:
+            current["passport_expiry"] = v("verified", d_expiry, d_expiry)
+
+    # ── LANGUAGE TEST ────────────────────────────────────────────
+    elif doc_type == "language_test_result":
+        lang_tests = applicant_db.language_tests or []
+        primary = next((t for t in lang_tests if t.role == "first"), lang_tests[0] if lang_tests else None)
+
+        for skill in ["listening", "reading", "writing", "speaking"]:
+            doc_val = get_f(skill)
+            prof_val = str(getattr(primary, skill, "") or "") if primary else ""
+            key = f"lang_{skill}"
+
+            if not primary:
+                current[key] = v("missing", "", doc_val, "Add language test to profile")
+            elif doc_val and prof_val:
+                try:
+                    diff = abs(float(doc_val) - float(prof_val))
+                    if diff < 0.1:
+                        current[key] = v("verified", prof_val, doc_val)
+                    elif diff < 1.0:
+                        current[key] = v("conflict", prof_val, doc_val,
+                            f"Small difference — profile {prof_val} vs TRF {doc_val}. Update profile to match TRF.")
+                    else:
+                        current[key] = v("conflict", prof_val, doc_val,
+                            f"Score mismatch — profile says {prof_val} but TRF shows {doc_val}. TRF is authoritative.")
+                except (ValueError, TypeError):
+                    current[key] = v("unverified", prof_val, doc_val)
+            elif doc_val:
+                current[key] = v("conflict", prof_val, doc_val,
+                    f"TRF shows {doc_val} but profile is empty — add this score to your profile")
+            elif prof_val:
+                current[key] = v("unverified", prof_val, None, "Upload TRF to verify")
+
+        # Test date
+        doc_date  = get_f("test_date")
+        prof_date = primary.test_date.isoformat() if primary and primary.test_date else ""
+        if doc_date and prof_date:
+            current["lang_test_date"] = v(
+                "verified" if doc_date == prof_date else "conflict",
+                prof_date, doc_date,
+                None if doc_date == prof_date else f"Profile date {prof_date} differs from TRF date {doc_date}"
+            )
+        elif doc_date:
+            current["lang_test_date"] = v("verified", doc_date, doc_date)
+
+    # ── EMPLOYMENT LETTER ────────────────────────────────────────
+    elif doc_type == "employment_letter":
+        doc_employer = get_f("employer_name")
+        work_exps = applicant_db.work_experiences or []
+        emp_count = emp_doc_count  # passed from call site to avoid greenlet issues
+        work_count = len(work_exps)
+
+        if emp_count > work_count:
+            current["work_experience_count"] = v(
+                "conflict", str(work_count), str(emp_count),
+                f"{emp_count} employment letters uploaded but only {work_count} work entries declared. "
+                f"IRCC requires all jobs declared — add missing {emp_count - work_count} job(s) to profile."
+            )
+        elif doc_employer and work_exps:
+            # Try to match employer name
+            matched = any(
+                w.employer_name and (
+                    doc_employer.lower() in w.employer_name.lower() or
+                    w.employer_name.lower() in doc_employer.lower()
+                )
+                for w in work_exps
+            )
+            if matched:
+                current["work_experience_count"] = v("verified", str(work_count), str(emp_count))
+            else:
+                current["work_experience_count"] = v(
+                    "conflict", str(work_count), str(emp_count),
+                    f"Employment letter for '{doc_employer}' has no matching work entry in profile"
+                )
+
+    # ── EDUCATION ────────────────────────────────────────────────
+    elif doc_type == "education_credential":
+        edu = applicant_db.education
+        current["education"] = v(
+            "verified" if edu else "conflict",
+            edu.level if edu else "",
+            get_f("level") or "",
+            None if edu else "Upload matched — but no education entry in profile"
+        )
+
+    # Persist
+    applicant_db.profile_verification = current
+    flag_modified(applicant_db, "profile_verification")
+    logger.info(f"_sync_profile_verification: doc_type={doc_type}  fields_updated={list(current.keys())}")
+
+
+async def _sync_spouse_verification(db, applicant_db, doc_type: str, extracted_fields: dict, doc_id: str):
+    """
+    After reviewing a spouse document, compare extracted fields against
+    spouse profile fields and write conflicts to profile_verification
+    using 'spouse_' prefixed keys so they show separately in the UI.
+    """
+    from sqlalchemy.orm.attributes import flag_modified
+    from datetime import datetime as _datetime
+
+    current = dict(applicant_db.profile_verification or {})
+
+    def get_f(key):
+        val = extracted_fields.get(key)
+        return str(val).strip() if val else None
+
+    def v(status, profile_val, doc_val=None, message=None):
+        return {
+            "status": status,
+            "profile_value": str(profile_val) if profile_val is not None else "",
+            "doc_value": str(doc_val) if doc_val is not None else "",
+            "doc_id": doc_id,
+            "message": message or "",
+            "acknowledged": False,
+            "person": "spouse",
+            "updated_at": _datetime.utcnow().isoformat(),
+        }
+
+    if doc_type == "language_test_result":
+        slt = applicant_db.spouse_language_test
+        for skill in ["listening", "reading", "writing", "speaking"]:
+            doc_val  = get_f(skill)
+            prof_val = str(getattr(slt, skill, "") or "") if slt else ""
+            key = f"spouse_lang_{skill}"
+
+            if not slt:
+                current[key] = v("missing", "", doc_val,
+                    f"Upload shows {skill} {doc_val} — add spouse language test to profile first")
+            elif doc_val and prof_val:
+                try:
+                    diff = abs(float(doc_val) - float(prof_val))
+                    if diff < 0.1:
+                        current[key] = v("verified", prof_val, doc_val)
+                    else:
+                        current[key] = v("conflict", prof_val, doc_val,
+                            f"Spouse profile {skill}: {prof_val} but document shows {doc_val}")
+                except (ValueError, TypeError):
+                    current[key] = v("unverified", prof_val, doc_val)
+            elif doc_val:
+                current[key] = v("conflict", "", doc_val,
+                    f"Document shows spouse {skill}: {doc_val} but no spouse language test in profile")
+
+        # Spouse test date
+        doc_date  = get_f("test_date")
+        prof_date = slt.test_date.isoformat() if slt and slt.test_date else ""
+        if doc_date and prof_date:
+            current["spouse_lang_test_date"] = v(
+                "verified" if doc_date == prof_date else "conflict",
+                prof_date, doc_date,
+                None if doc_date == prof_date
+                else f"Spouse test date: profile {prof_date} vs document {doc_date}"
+            )
+        elif doc_date and not prof_date:
+            current["spouse_lang_test_date"] = v("conflict", "", doc_date,
+                f"Document shows spouse test date {doc_date} — add to profile")
+
+    elif doc_type == "passport":
+        d_name = get_f("first_name") or ""
+        d_last = get_f("last_name") or ""
+        d_full = f"{d_name} {d_last}".strip()
+        p_name = applicant_db.spouse_name or ""
+
+        if d_full and p_name:
+            # Loose name match — check if last name matches
+            match = any(part.lower() in p_name.lower() for part in d_full.split() if len(part) > 2)
+            current["spouse_passport_name"] = v(
+                "verified" if match else "conflict",
+                p_name, d_full,
+                None if match else f"Spouse profile name '{p_name}' differs from passport '{d_full}'"
+            )
+        elif d_full:
+            current["spouse_passport_name"] = v("verified", d_full, d_full,
+                "Extracted from spouse passport — update spouse name in profile if needed")
+
+    applicant_db.profile_verification = current
+    flag_modified(applicant_db, "profile_verification")
+    logger.info(f"_sync_spouse_verification: doc_type={doc_type}  keys={[k for k in current if k.startswith('spouse_')]}")
 
 
 async def _auto_apply_extraction(db, applicant_db, doc_type, fields):

@@ -85,6 +85,17 @@ class ApplicantDB(Base):
     has_sibling_in_canada: Mapped[bool] = mapped_column(Boolean, default=False)
     has_certificate_of_qualification: Mapped[bool] = mapped_column(Boolean, default=False)
 
+    # Personal details for IRCC form
+    city_of_birth: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    gender: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    province_of_destination: Mapped[str | None] = mapped_column(String(100), nullable=True)
+
+    # Passport / travel document
+    passport_number: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    passport_country_of_issue: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    passport_issue_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    passport_expiry_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+
     # CRS Score (stored as JSON)
     crs_score_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     eligible_programs: Mapped[list | None] = mapped_column(JSON, nullable=True, default=list)
@@ -97,6 +108,10 @@ class ApplicantDB(Base):
     spouse_dob: Mapped[date | None] = mapped_column(Date, nullable=True)
     spouse_nationality: Mapped[str | None] = mapped_column(String(100), nullable=True)
     spouse_noc_code: Mapped[str | None] = mapped_column(String(20), nullable=True)
+
+    # Profile verification state — computed after each document review
+    # Structure: {field_key: {status, profile_value, doc_value, doc_id, message, acknowledged}}
+    profile_verification: Mapped[dict | None] = mapped_column(JSON, nullable=True, default=dict)
 
     profile_created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     profile_updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
