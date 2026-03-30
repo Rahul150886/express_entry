@@ -20,11 +20,11 @@ from infrastructure.config import get_settings
 
 settings = get_settings()
 
-logger.info(f"Database: engine URL = {str(settings.DATABASE_URL)[:50]}...")
-
-# echo=True in DEBUG mode also logs every SQL statement via SQLAlchemy
-engine = create_async_engine(settings.DATABASE_URL, pool_size=settings.DATABASE_POOL_SIZE, echo=settings.DEBUG)
+# Create engine at module load time
+logger.info(f"Database: engine URL = {str(settings.async_database_url)[:50]}...")
+engine = create_async_engine(settings.async_database_url, pool_size=settings.DATABASE_POOL_SIZE, echo=settings.DEBUG)
 logger.info(f"Database: async engine created  pool_size={settings.DATABASE_POOL_SIZE}  echo={settings.DEBUG}")
+
 AsyncSessionLocal = async_sessionmaker(engine, expire_on_commit=False)
 
 

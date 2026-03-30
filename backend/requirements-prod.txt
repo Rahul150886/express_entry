@@ -1,0 +1,67 @@
+# ─── Web Framework ────────────────────────────────────────────────────────────
+fastapi==0.115.0
+uvicorn[standard]==0.30.0
+python-multipart==0.0.9
+
+# ─── Database ─────────────────────────────────────────────────────────────────
+sqlalchemy==2.0.35
+alembic==1.13.3
+asyncpg==0.29.0
+psycopg2-binary==2.9.9
+
+# ─── Auth ─────────────────────────────────────────────────────────────────────
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+bcrypt==4.0.1
+python-dotenv==1.0.1
+
+# ─── AI & Azure ───────────────────────────────────────────────────────────────
+openai==1.50.0
+azure-ai-documentintelligence==1.0.0
+azure-storage-blob==12.22.0
+azure-cognitiveservices-speech==1.40.0
+semantic-kernel==1.0.0
+
+# ─── Background Jobs ──────────────────────────────────────────────────────────
+celery==5.4.0
+redis==5.1.0
+flower==2.0.1
+
+# ─── Real-time ────────────────────────────────────────────────────────────────
+websockets==13.0
+python-socketio==5.11.4
+
+# ─── HTTP Client ──────────────────────────────────────────────────────────────
+httpx==0.27.2
+aiohttp==3.10.5
+
+# ─── Web Scraping (IRCC draw monitor) - Lightweight ────────────────────────────
+beautifulsoup4==4.12.3
+lxml==5.3.0
+
+# ─── Data Validation ──────────────────────────────────────────────────────────
+pydantic[email]==2.9.2
+pydantic-settings==2.5.2
+email-validator==2.2.0
+
+# ─── Document Processing - Lightweight ─────────────────────────────────────────
+reportlab==4.2.5
+pillow==10.4.0
+pypdf2==3.0.1
+
+# ─── Utilities ────────────────────────────────────────────────────────────────
+python-dateutil==2.9.0
+pytz==2024.2
+dateparser==1.2.0
+
+# ─── Notifications ────────────────────────────────────────────────────────────
+firebase-admin==6.5.0
+sendgrid==6.11.0
+twilio==9.3.2
+
+# ─── Logging & Monitoring ─────────────────────────────────────────────────────
+loguru==0.7.2
+sentry-sdk==2.14.0
+
+# ─── Serialization ────────────────────────────────────────────────────────────
+orjson==3.10.7
