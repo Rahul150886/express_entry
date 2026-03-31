@@ -1,262 +1,289 @@
-# 🚀 Deploy to Railway — Step by Step
+# 🍁 Deploy to Railway — Step by Step Guide
 
-Deploy this full-stack app (FastAPI backend + React frontend + PostgreSQL) on [Railway](https://railway.app) **for free**.
+Deploy this Express Entry app (FastAPI + React + PostgreSQL) **for free** on [Railway.app](https://railway.app).
+
+**No code changes needed. Just follow these steps.**
 
 ---
 
-## What you'll deploy
+## ⏱️ Total time: ~15 minutes
 
-| Service | Tech | URL after deploy |
-|---|---|---|
-| **Backend** | FastAPI + Uvicorn | `https://your-backend.up.railway.app` |
-| **Frontend** | React + Nginx | `https://your-frontend.up.railway.app` |
-| **Database** | PostgreSQL | Managed by Railway (internal) |
+---
+
+## What you will get
+
+| Service | URL (after deploy) |
+|---|---|
+| ✅ Frontend (React app) | `https://YOUR-APP-frontend-production.up.railway.app` |
+| ✅ Backend (FastAPI) | `https://YOUR-APP-production.up.railway.app` |
+| ✅ Database (PostgreSQL) | Managed by Railway (internal, no URL needed) |
 
 ---
 
 ## Prerequisites
 
-- [Railway account](https://railway.app) (free)
-- [Railway CLI](https://docs.railway.app/guides/cli) installed:
-  ```bash
-  npm install -g @railway/cli
-  # or on macOS:
-  brew install railway
-  ```
-- Your own fork/clone of this repo pushed to GitHub
+You need these installed on your computer:
+
+**1. Node.js** (to install Railway CLI)
+- Download from https://nodejs.org (LTS version)
+
+**2. Railway CLI**
+```bash
+npm install -g @railway/cli
+```
+
+**3. A Railway account** (free)
+- Sign up at https://railway.app using your GitHub account
 
 ---
 
-## Step 1 — Fork & clone this repo
+## PART 1 — Deploy the Backend (FastAPI)
+
+### Step 1 — Clone this repo
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/express_entry.git
+git clone https://github.com/Rahul150886/express_entry.git
 cd express_entry
 ```
 
 ---
 
-## Step 2 — Login to Railway CLI
+### Step 2 — Login to Railway
 
 ```bash
 railway login
 ```
 
-This opens a browser — log in with GitHub.
+> This opens a browser. Click **"Login with GitHub"** and authorize Railway.
 
 ---
 
-## Step 3 — Deploy the Backend
+### Step 3 — Create a Railway project for the backend
 
-### 3a. Create a Railway project for the backend
+Run this from the **root of the repo** (the `express_entry` folder):
 
 ```bash
-cd express_entry   # repo root
 railway init
 ```
 
-- Select **"Create new project"**
-- Name it: `express-entry`
+You will see prompts:
+- **"Create new project"** → press Enter ✅
+- **"Project name"** → type `express-entry` and press Enter ✅
 
-### 3b. Deploy backend
+---
+
+### Step 4 — Deploy the backend
 
 ```bash
 railway up
 ```
 
-Railway will build using `backend/Dockerfile`.  
-Wait for it to finish — you'll see a build log URL.
+> This uploads your code and builds the backend Docker image.
+> It will print a **Build Logs URL** — open it in your browser to watch the build.
+> Wait until you see: **"Deploy complete"**
 
-### 3c. Add PostgreSQL database
+---
+
+### Step 5 — Add PostgreSQL database
 
 ```bash
 railway add --plugin postgresql
 ```
 
-This creates a managed Postgres instance. Railway automatically injects `DATABASE_URL` into your service — no manual config needed.
+> Railway creates a free PostgreSQL database and automatically connects it to your backend.
+> You don't need to configure anything — `DATABASE_URL` is injected automatically.
 
-### 3d. Set required environment variables
+---
+
+### Step 6 — Set environment variables
 
 ```bash
 railway variables set APP_ENV=production
-railway variables set SECRET_KEY=your-super-secret-key-change-this
+railway variables set SECRET_KEY=change-this-to-a-long-random-string
 railway variables set PORT=8000
 ```
 
-> **Optional** (AI features — app works without these):
-> ```bash
-> railway variables set AZURE_OPENAI_API_KEY=your-key
-> railway variables set AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com
-> railway variables set AZURE_DOC_INTELLIGENCE_KEY=your-key
-> railway variables set AZURE_DOC_INTELLIGENCE_ENDPOINT=https://your-resource.cognitiveservices.azure.com
-> railway variables set SENDGRID_API_KEY=your-key
-> ```
+> ⚠️ Change `SECRET_KEY` to something random, e.g. `MyS3cr3tK3y!Express2026`
 
-### 3e. Expose the backend and get its URL
+---
+
+### Step 7 — Get your backend URL
 
 ```bash
 railway domain
 ```
 
-Note your backend URL — you'll need it in Step 4.  
-Example: `https://express-entry-production.up.railway.app`
-
-### 3f. Verify backend is working
-
-```bash
-curl https://express-entry-production.up.railway.app/health
-# Expected: {"status":"healthy","timestamp":"..."}
-
-# Also check API docs:
-# https://express-entry-production.up.railway.app/docs
-```
+> This prints your backend URL. **Copy it** — you will need it in Part 2.
+> Example: `https://express-entry-production.up.railway.app`
 
 ---
 
-## Step 4 — Deploy the Frontend
+### Step 8 — Verify backend is working
 
-### 4a. Create a separate Railway project for the frontend
+Open this in your browser (replace with your actual URL):
+
+```
+https://YOUR-BACKEND-URL/health
+```
+
+You should see:
+```json
+{"status": "healthy", "timestamp": "..."}
+```
+
+Also check the API docs:
+```
+https://YOUR-BACKEND-URL/docs
+```
+
+✅ **Backend is live!**
+
+---
+
+## PART 2 — Deploy the Frontend (React)
+
+### Step 9 — Go to the frontend folder
 
 ```bash
 cd frontend
+```
+
+> ⚠️ Make sure you are inside the `frontend` folder for all steps in Part 2.
+
+---
+
+### Step 10 — Create a new Railway project for the frontend
+
+```bash
 railway init
 ```
 
-- Select **"Create new project"**
-- Name it: `express-entry-frontend`
+You will see prompts:
+- **"Create new project"** → press Enter ✅
+- **"Project name"** → type `express-entry-frontend` and press Enter ✅
 
-### 4b. Set the backend URL
+---
+
+### Step 11 — Set the backend URL
 
 ```bash
-railway variables set BACKEND_URL=https://express-entry-production.up.railway.app
+railway variables set BACKEND_URL=https://YOUR-BACKEND-URL-FROM-STEP-7
 ```
 
-> Replace with your actual backend URL from Step 3e.
+> ⚠️ Replace with the actual URL you copied in Step 7.
+> Example:
+> ```bash
+> railway variables set BACKEND_URL=https://express-entry-production.up.railway.app
+> ```
 
-### 4c. Deploy frontend
+---
+
+### Step 12 — Deploy the frontend
 
 ```bash
 railway up
 ```
 
-### 4d. Get the frontend URL
+> Wait until you see: **"Deploy complete"**
+
+---
+
+### Step 13 — Get your frontend URL
 
 ```bash
 railway domain
 ```
 
-Example: `https://express-entry-frontend-production.up.railway.app`
-
-### 4e. Verify frontend is working
-
-```bash
-curl -s -o /dev/null -w "%{http_code}" https://express-entry-frontend-production.up.railway.app
-# Expected: 200
-```
-
-Open the URL in your browser — you should see the app! 🎉
+> Open this URL in your browser — you should see the app! 🎉
 
 ---
 
-## Step 5 — Connect GitHub for Auto-Deploy (Recommended)
+## PART 3 — Auto-deploy on code changes (Optional but Recommended)
 
-Instead of running `railway up` every time you make a change, connect Railway to GitHub so it deploys automatically on every `git push`.
+Connect Railway to GitHub so it **deploys automatically on every `git push`** — no need to run `railway up` again.
 
-### For the Backend service:
+### For the Backend:
 1. Go to [railway.com](https://railway.com) → open **"express-entry"** project
 2. Click the service → **Settings** tab
-3. Under **Source** → click **"Connect Repo"**
-4. Select your GitHub repo
-5. Set **Root Directory** → `backend`
-6. Set **Branch** → `main`
+3. **Source** → **"Connect Repo"** → select your GitHub repo
+4. **Root Directory** → set to `backend`
+5. **Branch** → `main` → Save
 
-### For the Frontend service:
+### For the Frontend:
 1. Go to [railway.com](https://railway.com) → open **"express-entry-frontend"** project
 2. Click the service → **Settings** tab
-3. Under **Source** → click **"Connect Repo"**
-4. Select your GitHub repo
-5. Set **Root Directory** → `frontend`
-6. Set **Branch** → `main`
+3. **Source** → **"Connect Repo"** → select your GitHub repo
+4. **Root Directory** → set to `frontend`
+5. **Branch** → `main` → Save
 
-After this, your workflow is just:
+After connecting, your workflow is just:
 ```bash
 git add -A
-git commit -m "your change"
+git commit -m "my change"
 git push
-# Railway auto-builds and deploys both services 🚀
+# Railway auto-builds and deploys 🚀
 ```
 
 ---
 
-## Architecture on Railway
+## All commands at a glance
 
+```bash
+# ── STEP 1: Clone ────────────────────────────────
+git clone https://github.com/Rahul150886/express_entry.git
+cd express_entry
+
+# ── STEP 2-7: Backend ────────────────────────────
+railway login
+railway init                    # name it: express-entry
+railway up                      # deploy backend
+railway add --plugin postgresql # add database
+railway variables set APP_ENV=production
+railway variables set SECRET_KEY=change-this-to-something-random
+railway variables set PORT=8000
+railway domain                  # COPY this URL — needed for frontend
+
+# ── STEP 9-13: Frontend ──────────────────────────
+cd frontend
+railway init                    # name it: express-entry-frontend
+railway variables set BACKEND_URL=https://PASTE-BACKEND-URL-HERE
+railway up                      # deploy frontend
+railway domain                  # open this URL in browser ← your app!
 ```
-User Browser
-     │
-     ▼
-┌─────────────────────────────┐
-│  Frontend (nginx)           │  https://your-frontend.up.railway.app
-│  - Serves React SPA         │
-│  - Proxies /api/ → Backend  │
-└──────────────┬──────────────┘
-               │ HTTPS proxy
-               ▼
-┌─────────────────────────────┐
-│  Backend (FastAPI)          │  https://your-backend.up.railway.app
-│  - REST API on $PORT        │
-│  - Connects to PostgreSQL   │
-└──────────────┬──────────────┘
-               │ Internal
-               ▼
-┌─────────────────────────────┐
-│  PostgreSQL (Railway Plugin)│  Internal only (not exposed)
-└─────────────────────────────┘
-```
-
----
-
-## Key Files Changed for Railway
-
-| File | What changed |
-|---|---|
-| `backend/Dockerfile` | Use `${PORT:-8000}` instead of hardcoded `8000` |
-| `backend/infrastructure/config.py` | Read `DATABASE_URL` from env, convert to asyncpg format |
-| `backend/infrastructure/persistence/database.py` | Use `async_database_url` property |
-| `frontend/Dockerfile` | Use `docker-entrypoint.sh` instead of static nginx config |
-| `frontend/docker-entrypoint.sh` | Generates nginx config at runtime using `$PORT` and `$BACKEND_URL` |
-| `railway.json` | Railway config for backend (port, restart policy) |
-| `frontend/railway.json` | Railway config for frontend |
 
 ---
 
 ## Troubleshooting
 
-### Backend returns 502
-- Wait 30 seconds — container may still be starting
-- Check logs: `railway logs --tail 50` (from repo root)
-- Make sure `PORT` is set: `railway variables set PORT=8000`
+**"Application failed to respond" (502)**
+- Wait 30 seconds and refresh — container may still be starting
+- Check logs: `railway logs --tail 30` (from repo root for backend)
+- Ensure `PORT=8000` is set: `railway variables`
 
-### Frontend returns 502
-- Check `BACKEND_URL` is set correctly: `railway variables` (from frontend dir)
+**Frontend shows blank page or error**
+- Check `BACKEND_URL` is set: `cd frontend && railway variables`
 - Check frontend logs: `cd frontend && railway logs --tail 20`
+- Confirm backend `/health` works first (Step 8)
 
-### Database errors
-- Make sure you ran `railway add --plugin postgresql`
-- Railway auto-injects `DATABASE_URL` — no manual setting needed
-- Check logs for "Database tables ready" message
+**Database errors**
+- Confirm you ran `railway add --plugin postgresql` (Step 5)
+- Look for "Database tables ready" in logs: `railway logs --tail 50`
 
-### Build fails
-- Check you're in the right directory (`repo root` for backend, `frontend/` for frontend)
-- Check build logs at the URL printed during `railway up`
+**Build fails**
+- Backend commands must be run from `express_entry/` (repo root)
+- Frontend commands must be run from `express_entry/frontend/`
 
 ---
 
-## URLs Summary
+## Optional: Enable AI features
 
-After deployment, bookmark these:
+The app works without these. Set them to enable AI chat, document review, and NOC matching:
 
-| URL | Purpose |
-|---|---|
-| `https://your-frontend.up.railway.app` | The app (open this in browser) |
-| `https://your-backend.up.railway.app/docs` | API documentation (Swagger UI) |
-| `https://your-backend.up.railway.app/health` | Backend health check |
+```bash
+# Run from repo root (backend project)
+railway variables set AZURE_OPENAI_API_KEY=your-key
+railway variables set AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com
+railway variables set AZURE_DOC_INTELLIGENCE_KEY=your-key
+railway variables set AZURE_DOC_INTELLIGENCE_ENDPOINT=https://your-resource.cognitiveservices.azure.com
+railway variables set SENDGRID_API_KEY=your-key
+```
