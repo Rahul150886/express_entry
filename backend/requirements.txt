@@ -19,8 +19,8 @@ python-dotenv==1.0.1
 openai==1.50.0
 azure-ai-documentintelligence==1.0.0
 azure-storage-blob==12.22.0
-azure-cognitiveservices-speech==1.40.0
-semantic-kernel==1.0.0
+# azure-cognitiveservices-speech — NOT imported anywhere, removed to reduce image size
+# semantic-kernel — NOT imported anywhere, removed to reduce image size
 
 # ─── Background Jobs ──────────────────────────────────────────────────────────
 celery==5.4.0
@@ -38,7 +38,7 @@ aiohttp==3.10.5
 # ─── Web Scraping (IRCC draw monitor) ─────────────────────────────────────────
 beautifulsoup4==4.12.3
 lxml==5.3.0
-playwright==1.47.0
+# playwright removed — uses httpx + beautifulsoup4 for scraping (no browser needed)
 
 # ─── Data Validation ──────────────────────────────────────────────────────────
 pydantic[email]==2.9.2
@@ -74,6 +74,9 @@ sentry-sdk==2.14.0
 # ─── Serialization ────────────────────────────────────────────────────────────
 orjson==3.10.7
 
-# ─── Vector DB for RAG ────────────────────────────────────────────────────────
-chromadb>=0.6.0
-sentence-transformers==3.1.1
+# ─── Vector DB for RAG (optional — lazy imported, app works without these) ────
+# chromadb and sentence-transformers are huge (~2.5GB combined).
+# They are lazy-imported only when RAG chat is used.
+# Install them manually if you need RAG: pip install chromadb sentence-transformers
+# chromadb>=0.6.0
+# sentence-transformers==3.1.1
