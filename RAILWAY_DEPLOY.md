@@ -42,7 +42,7 @@ npm install -g @railway/cli
 ### Step 1 — Clone this repo
 
 ```bash
-git clone https://github.com/Rahul150886/express_entry.git
+git clone https://github.com/dhruv-rajput/express_entry.git
 cd express_entry
 ```
 
@@ -230,7 +230,7 @@ git push
 
 ```bash
 # ── STEP 1: Clone ────────────────────────────────
-git clone https://github.com/Rahul150886/express_entry.git
+git clone https://github.com/dhruv-rajput/express_entry.git
 cd express_entry
 
 # ── STEP 2-7: Backend ────────────────────────────
