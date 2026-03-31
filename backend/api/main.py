@@ -313,15 +313,24 @@ notification_service = NotificationService()
 async def lifespan(app: FastAPI):
     logger.info("Starting Express Entry PR API...")
     logger.info(f"  ENV            : {settings.APP_ENV}")
-    logger.info(f"  DATABASE_URL   : {settings.DATABASE_URL[:40]}...")
+    logger.info(f"  DATABASE_URL   : {settings.DATABASE_URL[:40] if settings.DATABASE_URL else 'NOT SET'}...")
     logger.info(f"  REDIS_URL      : {settings.REDIS_URL}")
     logger.info(f"  AZURE_OPENAI   : {'✓ configured' if settings.AZURE_OPENAI_API_KEY else '✗ NOT SET — AI endpoints will return 503'}")
     logger.info(f"  AZURE_DOC_INTEL: {'✓ configured' if settings.AZURE_DOC_INTELLIGENCE_KEY else '✗ NOT SET — document AI disabled'}")
     logger.info(f"  AZURE_STORAGE  : {'✓ configured' if settings.AZURE_STORAGE_CONNECTION_STRING else '✗ NOT SET — using local disk storage'}")
     logger.info(f"  SENDGRID       : {'✓ configured' if settings.SENDGRID_API_KEY else '✗ NOT SET — emails disabled'}")
     logger.info(f"  CHROMA         : {settings.CHROMA_HOST}:{settings.CHROMA_PORT}")
-    await init_db()
-    logger.info("Database tables initialised")
+    
+    # Try to initialize database, but continue if it fails (for deployment without DB yet)
+    try:
+        if settings.DATABASE_URL and "localhost" not in settings.DATABASE_URL:
+            await init_db()
+            logger.info("Database tables initialised")
+        else:
+            logger.warning("Database URL not properly configured, skipping DB init")
+    except Exception as e:
+        logger.warning(f"Database initialization failed: {e}. Continuing without DB...")
+    
     yield
     logger.info("Shutting down...")
 
@@ -1016,7 +1025,8 @@ async def calculate_crs(
     applicant_db.eligible_programs = [p.value for p in eligibility["eligible_programs"]]
 
     await db.commit()
-    logger.info(f"CRS calculated: total={score.total}  core={score.core_human_capital}  transferability={score.skill_transferability}  additional={score.additional_points}  programs={[p.value for p in eligibility["eligible_programs"]]}  user_id={current_user.id}")
+    eligible_programs = [p.value for p in eligibility["eligible_programs"]]
+    logger.info(f"CRS calculated: total={score.total}  core={score.core_human_capital}  transferability={score.skill_transferability}  additional={score.additional_points}  programs={eligible_programs}  user_id={current_user.id}")
     return {
         "score": score.breakdown(),
         "breakdown": vars(breakdown),

@@ -30,14 +30,25 @@ class Settings(BaseSettings):
     DEBUG: bool = True
     API_V1_PREFIX: str = "/api/v1"
 
-    # Database
-    DATABASE_URL: str = "postgresql+asyncpg://postgres:password@localhost:5432/express_entry"
+    # Database - use environment variable, fallback to localhost for local dev
+    # In production (Railway), this MUST be set via environment variable
+    # If not set, will log warning and continue without DB
+    DATABASE_URL: str = os.getenv("DATABASE_URL", "")
     DATABASE_POOL_SIZE: int = 10
 
-    # Redis / Celery
-    REDIS_URL: str = "redis://localhost:6379/0"
-    CELERY_BROKER_URL: str = "redis://localhost:6379/1"
-    CELERY_RESULT_BACKEND: str = "redis://localhost:6379/2"
+    @property
+    def async_database_url(self) -> str:
+        """Convert DATABASE_URL to async format (asyncpg driver)"""
+        if not self.DATABASE_URL:
+            return ""
+        # Convert postgresql:// to postgresql+asyncpg://
+        url = self.DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://")
+        return url
+
+    # Redis / Celery - fallback to localhost for local dev
+    REDIS_URL: str = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+    CELERY_BROKER_URL: str = os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/1")
+    CELERY_RESULT_BACKEND: str = os.getenv("CELERY_RESULT_BACKEND", "redis://localhost:6379/2")
 
     # Azure OpenAI
     AZURE_OPENAI_API_KEY: str = ""
@@ -80,6 +91,7 @@ class Settings(BaseSettings):
         env_file = ".env"
         env_file_encoding = "utf-8"
         case_sensitive = True
+        extra = "ignore"
 
     @property
     def azure_openai_endpoint_clean(self) -> str:
